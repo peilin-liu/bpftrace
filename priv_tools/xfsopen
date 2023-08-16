@@ -1,28 +1,17 @@
 #! /usr/bin/python2
 # @lint-avoid-python-3-compatibility-imports
 #
-# xfsslower  Trace slow XFS operations.
-#            For Linux, uses BCC, eBPF.
-#
 # USAGE: xfsslower [-h] [-j] [-p PID] [min_ms]
 #
-# This script traces common XFS file operations: reads, writes, opens, and
-# syncs. It measures the time spent in these operations, and prints details
+# This script traces common XFS file operations:opens, and
+# It measures the time spent in these operations, and prints details
 # for each that exceeded a threshold.
 #
-# WARNING: This adds low-overhead instrumentation to these XFS operations,
-# including reads and writes from the file system cache. Such reads and writes
-# can be very frequent (depending on the workload; eg, 1M/sec), at which
 # point the overhead of this tool (even if it prints no "slower" events) can
 # begin to become significant.
 #
 # By default, a minimum millisecond threshold of 10 is used.
 #
-# Copyright 2016 Netflix, Inc.
-# Licensed under the Apache License, Version 2.0 (the "License")
-#
-# 11-Feb-2016   Brendan Gregg   Created this.
-# 16-Oct-2016   Dina Goldshtein -p to filter by process ID.
 
 from __future__ import print_function
 from bcc import BPF
@@ -32,14 +21,14 @@ import ctypes as ct
 
 # arguments
 examples = """examples:
-    ./xfsslower             # trace operations slower than 10 ms (default)
-    ./xfsslower 1           # trace operations slower than 1 ms
-    ./xfsslower -j 1        # ... 1 ms, parsable output (csv)
-    ./xfsslower 0           # trace all operations (warning: verbose)
-    ./xfsslower -p 185      # trace PID 185 only
+    ./xfsopen             # trace operations slower than 10 ms (default)
+    ./xfsopen 1           # trace operations slower than 1 ms
+    ./xfsopen -j 1        # ... 1 ms, parsable output (csv)
+    ./xfsopen 0           # trace all operations (warning: verbose)
+    ./xfsopen -p 185      # trace PID 185 only
 """
 parser = argparse.ArgumentParser(
-    description="Trace common XFS file operations slower than a threshold",
+    description="Trace common XFS file open operations slower than a threshold",
     formatter_class=argparse.RawDescriptionHelpFormatter,
     epilog=examples)
 parser.add_argument("-j", "--csv", action="store_true",
@@ -64,10 +53,8 @@ bpf_text = """
 #include <linux/dcache.h>
 
 // XXX: switch these to char's when supported
-#define TRACE_READ      0
-#define TRACE_WRITE     1
-#define TRACE_OPEN      2
-#define TRACE_FSYNC     3
+#define TRACE_OPEN      0
+
 
 struct val_t {
     u64 ts;
