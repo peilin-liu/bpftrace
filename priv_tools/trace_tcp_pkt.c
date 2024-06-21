@@ -4,6 +4,7 @@
 #include <uapi/linux/ipv6.h>
 #include <uapi/linux/tcp.h>
 #include <net/inet_sock.h>
+#include <net/sock.h>
 #include <linux/netfilter/x_tables.h>
 
 #define ROUTE_EVT_IF 1
@@ -34,6 +35,7 @@ struct route_evt_t {
     u64 verdict;
     char tablename[XT_TABLE_MAXNAMELEN];
     char comm_name[64];
+    u64 sock_key;
 };
 BPF_PERF_OUTPUT(route_evt);
 
@@ -81,7 +83,14 @@ static inline int filter_host_port(__be64 saddr, __be64	daddr,
         if ( saddr == filter_host || daddr == filter_host){
             return TRUE;
         }
-    } else {
+    } else if (sport == 51325 || dport == 51325 ) {
+        return FALSE;
+    } else if (sport == 20480 || dport == 20480) {
+        return FALSE;
+    } else if (sport == 18293 || dport == 18293) {
+        return FALSE;
+    } else if (sport == 17781 || dport == 17781) { return FALSE;}
+    else {
         return TRUE;
     }
     
@@ -97,6 +106,7 @@ static inline int parse_skb_tcp_info(struct route_evt_t *evt, void *ctx, struct 
     u16 transport_header;
 
     struct tcphdr * tcp_header = 0;
+    struct sock* sock_s = 0;
     char *ip_header_address = 0;
 
     member_read(&head, skb, head);
@@ -105,6 +115,7 @@ static inline int parse_skb_tcp_info(struct route_evt_t *evt, void *ctx, struct 
     member_read(&mac_header, skb, mac_header);
     member_read(&network_header, skb, network_header);
     member_read(&transport_header, skb, transport_header);
+    member_read(&sock_s, skb, sk);
 
     if(network_header == 0 && mac_header != (typeof(skb->mac_header))~0U) { //mac was set
         ip_header_address = data;
@@ -148,6 +159,11 @@ static inline int parse_skb_tcp_info(struct route_evt_t *evt, void *ctx, struct 
         return FALSE;
     }
     
+    if(sock_s){
+       struct sock_common sk_common;
+       member_read(&sk_common, sock_s, __sk_common);
+       evt->sock_key = sk_common.skc_hash;
+    }
     // Filter TCP packets
     __be16	sport, dport;
     member_read(&sport, tcp_header, source);
@@ -162,7 +178,13 @@ static inline int parse_skb_tcp_info(struct route_evt_t *evt, void *ctx, struct 
         bpf_trace_printk("parse_skb_tcp skip, daddr %d.%d", ((char*)(&daddr))[0]&0xFF,  ((char*)(&daddr))[1]&0xFF);
         bpf_trace_printk("%d.%d\n", ((char*)(&daddr))[2]&0xFF,  ((char*)(&daddr))[3]&0xFF);
         */
-        bpf_trace_printk("parse_skb_tcp_info skip, sport %d, dport %d\n", bpf_ntohs(sport), bpf_ntohs(dport));
+        //bpf_trace_printk("parse_skb_tcp_info skip, sport %d, dport %d\n", bpf_ntohs(sport), bpf_ntohs(dport));
+        if(bpf_ntohs(sport) == 22 ){
+            bpf_trace_printk("parse_skb_tcp_info, get sock info is port %d hash %d\n", bpf_ntohs(dport), evt->sock_key);
+        } else if (bpf_ntohs(dport) ==22) {
+            bpf_trace_printk("parse_skb_tcp_info, get sock info is port %d hash %d\n", bpf_ntohs(sport), evt->sock_key);
+        }
+        
         return FALSE;
     }
     evt->sport = sport; evt->dport = dport;

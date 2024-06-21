@@ -58,6 +58,7 @@ class PkgEvt(ct.Structure):
         ("verdict",     ct.c_ulonglong),
         ("tablename",   ct.c_char * XT_TABLE_MAXNAMELEN),
         ("comm_name",   ct.c_char * 64),
+        ("sock_key",    ct.c_ulonglong),
     ]
 
 
@@ -104,7 +105,7 @@ def event_handler(cpu, data, size):
         iptables = "                                  "
 
     # Print event
-    print("[%-12s] %9s:%-9s %-16s %-42s %-34s %-64s" % (event.netns, event.pid, event.tgid, event.ifname, flow, iptables, event.comm_name))
+    print("[%-12s] %9s:%-9s %-16s %-42s %-34s %-9s %-64s" % (event.netns, event.pid, event.tgid, event.ifname, flow, iptables, event.sock_key, event.comm_name))
 
 
 if __name__ == "__main__":
@@ -159,12 +160,14 @@ if __name__ == "__main__":
 
     # Build probe and open event buffer
     b = BPF(text=bpf_text, cflags=cflags)
+    b.load_funcs(BPF.CGROUP_SKB)
     b["route_evt"].open_perf_buffer(event_handler)
 
-    print("%-14s %-19s %-16s %-42s %-34s %-13s" % ('NETWORK NS', 'PID', 'INTERFACE', 'ADDRESSES', 'IPTABLES', 'COMMON_NAME'))
+    print("%-14s %-19s %-16s %-42s %-34s %-9s %-13s" % ('NETWORK NS', 'PID', 'INTERFACE', 'ADDRESSES', 'IPTABLES', 'SOCK_KEY', 'COMMON_NAME'))
 
     while 1:
         try:
             b.perf_buffer_poll(10)
         except KeyboardInterrupt:
+            b.cleanup()
             os._exit(0)
