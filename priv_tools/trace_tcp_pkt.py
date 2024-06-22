@@ -160,7 +160,7 @@ if __name__ == "__main__":
 
     # Build probe and open event buffer
     b = BPF(text=bpf_text, cflags=cflags)
-    b.load_funcs(BPF.CGROUP_SKB)
+    #b.load_funcs(BPF.CGROUP_SKB)
     b["route_evt"].open_perf_buffer(event_handler)
 
     print("%-14s %-19s %-16s %-42s %-34s %-9s %-13s" % ('NETWORK NS', 'PID', 'INTERFACE', 'ADDRESSES', 'IPTABLES', 'SOCK_KEY', 'COMMON_NAME'))
