@@ -58,7 +58,6 @@ class PkgEvt(ct.Structure):
         ("verdict",     ct.c_ulonglong),
         ("tablename",   ct.c_char * XT_TABLE_MAXNAMELEN),
         ("comm_name",   ct.c_char * 64),
-        ("sock_key",    ct.c_ulonglong),
     ]
 
 
@@ -105,12 +104,14 @@ def event_handler(cpu, data, size):
         iptables = "                                  "
 
     # Print event
-    print("[%-12s] %9s:%-9s %-16s %-42s %-34s %-9s %-64s" % (event.netns, event.pid, event.tgid, event.ifname, flow, iptables, event.sock_key, event.comm_name))
+    print("[%-12s] %9s:%-9s %-16s %-42s %-34s %-64s" % (event.netns, event.pid, event.tgid, event.ifname, flow, iptables, event.comm_name))
 
 
 if __name__ == "__main__":
     # Get arguments
     parser = argparse.ArgumentParser()
+    parser.add_argument('--container_ip', dest='container_ip', type=str, required=True, default='')
+    parser.add_argument('--cgroup_path', dest='cgroup_path', type=str, required=False, default=None)
     parser.add_argument('--pid',  dest='pid',  type=int, required=False, default=-1)
     parser.add_argument('--host', dest='host', type=str, required=False, default='')
     parser.add_argument('--port', dest='port', type=int, required=False, default=-1)
@@ -119,6 +120,21 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     bpf_filters = {}
+
+    container_ip = int(inet_pton(AF_INET, args.container_ip).encode('hex'), 16)
+    if container_ip <= 0:
+        print("invalid container_ip %s", args.container_ip)
+        exit(-1)
+    container_ip_filter = """%d""" % (htonl(container_ip))
+    bpf_filters.update({"CONTAINER_FILTER": container_ip_filter})
+
+    cgroup_map_def = ""
+    cgroup_map_name = None
+    if args.cgroup_path is not None:
+        cgroup_map_name = "__cgroup"
+        cgroup_map_def = "BPF_CGROUP_ARRAY(%s, 1);\n" % cgroup_map_name
+    bpf_filters.update({"BPF_CGROUP_ARRAY_DEF": cgroup_map_def})
+
     if args.pid < 0:
         pid_filter = """"""
     else:
@@ -160,10 +176,15 @@ if __name__ == "__main__":
 
     # Build probe and open event buffer
     b = BPF(text=bpf_text, cflags=cflags)
+
+    if args.cgroup_path:
+        cgroup_array = self.bpf.get_table(cgroup_map_name)
+        cgroup_array[0] = self.args.cgroup_path
+
     #b.load_funcs(BPF.CGROUP_SKB)
     b["route_evt"].open_perf_buffer(event_handler)
 
-    print("%-14s %-19s %-16s %-42s %-34s %-9s %-13s" % ('NETWORK NS', 'PID', 'INTERFACE', 'ADDRESSES', 'IPTABLES', 'SOCK_KEY', 'COMMON_NAME'))
+    print("%-14s %-19s %-16s %-42s %-34s %-13s" % ('NETWORK NS', 'PID', 'INTERFACE', 'ADDRESSES', 'IPTABLES', 'COMMON_NAME'))
 
     while 1:
         try:
