@@ -10,6 +10,7 @@
 #define ROUTE_EVT_IF 1
 #define ROUTE_EVT_IPTABLE 2
 #define ROUTE_EVT_NAT 4
+#define ROUTE_EVT_CONNECT 8
 #define TRUE 1
 #define FALSE 0
 // Event structure
@@ -119,14 +120,6 @@ static inline int filter_host_port(__be64 saddr, __be64	daddr,
     
     if(!conn_nat_map.lookup(&src) && !conn_nat_map.lookup(&dst)){
         return FALSE;
-    }
-
-    if(s_a_p){
-        //bpf_trace_printk("filter_host_port, found src %ld:%d\n", saddr, sport);
-    }
-
-    if(d_a_p){
-        //bpf_trace_printk("filter_host_port, found dst %ld:%d\n", daddr, dport);
     }
 
     if(filter_host > 0 && filter_port > 0) {
@@ -574,14 +567,39 @@ int kretprobe__nf_nat_ipv4_fn(struct pt_regs *ctx)
     return 0;
 }
 
+int kprobe__tcp_connect(struct pt_regs *ctx, struct sock *sk) {
+    struct inet_sock *inet = inet_sk(sk);
+    u64 pid_tgid = bpf_get_current_pid_tgid();
+    u32 k_pid = pid_tgid & 0xFFFFFFFF;
+    u32 pid = pid_tgid >> 32;
+
+    struct route_evt_t evt = {
+        .flags = ROUTE_EVT_CONNECT,
+        .pid  = pid,
+        .tgid  = k_pid,
+    };
+
+    member_read(&evt.saddr, inet, inet_saddr);
+    member_read(&evt.sport, inet, inet_sport);
+
+    if(evt.saddr == CONTAINER_FILTER){
+        return insert_tcp_conn_trace(evt.saddr, evt.sport, 0, 0);
+    } else {
+        bpf_trace_printk("tcp_connect, skip %ld:%d\n",
+            evt.saddr, evt.sport);
+    }
+
+    return 0;
+}
+
 int kprobe____sys_connect(struct pt_regs *ctx, 
                     int fd, struct sockaddr *uservaddr, int addrlen)
 {
     __u64 cgroup_id = bpf_get_current_cgroup_id();
 
-    if(4294968515 != cgroup_id) { return 0;}
-    bpf_trace_printk("sys_connect, fd %d, cgroup_id %ld, addrlen %d\n",
-                fd, cgroup_id, addrlen);
+    //if(4294968515 != cgroup_id) { return 0;}
+    //bpf_trace_printk("sys_connect, fd %d, cgroup_id %ld, addrlen %d\n",
+    //            fd, cgroup_id, addrlen);
     return 0;
 }
 
