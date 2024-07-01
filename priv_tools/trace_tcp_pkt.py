@@ -56,9 +56,9 @@ class Evt(object):
         ROUTE_EVT_IF_SKB_R:     'SKB_R',
         ROUTE_EVT_IF_DEV_W:     'DEV_W',
         ROUTE_EVT_IPTABLE:      'D_IPT',
-        ROUTE_EVT_NAT_IN:       'NAT_IN',
-        ROUTE_EVT_NAT_OUT:      'NAT_OUT',
-        ROUTE_EVT_CONNECT:      'CONNECT',
+        ROUTE_EVT_NAT_IN:       'NAT_I',
+        ROUTE_EVT_NAT_OUT:      'NAT_O',
+        ROUTE_EVT_CONNECT:      'CONN',
         ROUTE_EVT_ACCEPT:       'ACCEPT',
         ROUTE_EVT_READ:         'U_R',
         ROUTE_EVT_WRITE:        'U_W',
@@ -74,12 +74,13 @@ class PkgEvt(ct.Structure):
     _fields_ = [
         # Content event_flags
         ("event_flags",  ct.c_uint32),
+        ("pid",         ct.c_ulonglong),
+        ("tgid",        ct.c_ulonglong),
         # Routing information
         ("ifname",  ct.c_char * IFNAMSIZ),
         ("netns",   ct.c_ulonglong),
 
         # Packet type (IPv4 or IPv6) and address
-        ("ip_version",  ct.c_ulonglong),
         ("saddr",       ct.c_ulonglong),
         ("daddr",       ct.c_ulonglong),
         ("sport",       ct.c_ushort),
@@ -87,12 +88,12 @@ class PkgEvt(ct.Structure):
         ("tcp_flags",   ct.c_ushort),
         ("ip_payload_len", ct.c_ushort),
         ("tcp_payload_len",ct.c_ushort),
-        ("pid",         ct.c_ulonglong),
-        ("tgid",        ct.c_ulonglong),
+        ("ip_version",   ct.c_ubyte),
+        ("res1",         ct.c_ubyte),
 
         # Iptables trace
-        ("hook",        ct.c_ulonglong),
-        ("verdict",     ct.c_ulonglong),
+        ("hook",        ct.c_uint32),
+        ("verdict",     ct.c_int32),
         ("data_union",   PkgEvtUnion),
         ("comm_name",   ct.c_char * 64),
     ]
@@ -120,7 +121,7 @@ def format_tcp_flags(flags):
 
 def event_error_handler(event, formatted_datetime):
     if not event.event_flags & (Evt.ROUTE_EVT_CONNECT|Evt.ROUTE_EVT_READ|Evt.ROUTE_EVT_WRITE):
-        return
+        return False
     
     event_flags = event.event_flags
     event_flags = event_flags & ~Evt.ROUTE_D_OUT
@@ -137,7 +138,8 @@ def event_error_handler(event, formatted_datetime):
         
     print("[%-20s] %-16s %-42s %-34s %-6s %-12s %-10s %-24s" % (formatted_datetime, event.ifname, flow,
         info, Evt.e_maps[event.event_flags], format_tcp_flags(event.tcp_flags), data_len, event.comm_name))
-        
+    
+    return True
 
 def event_handler(cpu, data, size):
     # Decode event
@@ -147,7 +149,8 @@ def event_handler(cpu, data, size):
     
     now = datetime.now()
     formatted_datetime = now.strftime("%D %H:%M:%S.%f")[:-3]
-    event_error_handler(event, formatted_datetime)
+    if event_error_handler(event, formatted_datetime):
+        return
 
     # Make sure this is an interface event
     if Evt.e_maps.get(event_flags) is None:
@@ -311,7 +314,6 @@ if __name__ == "__main__":
         cgroup_array[0] = args.cgroup_path
 
     attch_all_probe(args.probe_ipv6 == "enable")
-    #b.load_funcs(BPF.CGROUP_SKB)
     b["route_evt"].open_perf_buffer(event_handler)
 
     print("%-23s %-16s %-42s %-34s %-6s %-10s %-10s %-13s" % ('TIMESTAMP', 'INTERFACE', 'ADDRESSES', 'IPTABLES', 'EVENT', 'TCP_FLAGS', 'SIZE(IP:TCP)', 'COMMON_NAME'))

@@ -1,4 +1,3 @@
-#include <bcc/proto.h>
 #include <uapi/linux/in.h>
 #include <uapi/linux/ip.h>
 #include <uapi/linux/ipv6.h>
@@ -6,6 +5,7 @@
 #include <net/inet_sock.h>
 #include <net/sock.h>
 #include <linux/netfilter/x_tables.h>
+#include <bcc/proto.h>
 
 #ifndef DEBUGLOG
 #define bpf_trace_printk(...) 
@@ -24,24 +24,25 @@
 #define ROUTE_EVT_WRITE     (1<<10)
 #define ROUTE_EVT_FORWARD   (1<<11)
 
-
-
 #define ROUTE_D_OUT   (1<<23)
-
 
 #define TRUE 1
 #define FALSE 0
+
+#define CONN_IN 0
+#define CONN_OUT 1
 
 // Event structure
 struct route_evt_t {
     /* Content event_flags */
     u32 event_flags;
+    u64 pid;
+    u64 tgid;
     /* Routing information */
     char ifname[IFNAMSIZ];
     u64 netns;
 
     /* Packet type (IPv4 or IPv6) and address */
-    u64 ip_version; // familiy (IPv4 or IPv6)
     __be64 saddr;
     __be64 daddr;
 	u16	sport;
@@ -49,12 +50,12 @@ struct route_evt_t {
     u16 tcp_flags;
     u16 ip_payload_len;
     u16 tcp_payload_len;
-    u64 pid;
-    u64 tgid;
+    u8  ip_version; // familiy (IPv4 or IPv6)
+    u8  res1;
 
     /* Iptables trace */
-    u64 hook;
-    u64 verdict;
+    u32 hook;
+    __be32 verdict;
     union 
     {
         char tablename[XT_TABLE_MAXNAMELEN];
@@ -101,10 +102,8 @@ BPF_HASH(cur_ipt_do_table_args, u64, struct ipt_do_table_args);
 BPF_HASH(cur_ipt_do_nat_args, u64, struct ipt_do_nat_args);
 BPF_HASH(conn_nat_out_map, sock_peer, sock_peer);
 BPF_HASH(conn_nat_in_map, sock_peer, sock_peer);
-BPF_HASH(conn_conn_out_map, u64, struct conn_status_args);
-BPF_HASH(conn_conn_in_map, u64, struct conn_status_args);
+BPF_HASH(conn_conn_args_map, u64, struct conn_status_args);
 BPF_HASH(conn_rw_map, u64, struct conn_status_args);
-BPF_HASH(conn_active_map, u64, u64);
 
 BPF_CGROUP_ARRAY_DEF
 
@@ -344,60 +343,114 @@ static inline int do_trace(void *ctx, struct sk_buff *skb, __u32 op_evt)
     return 0;
 }
 
-static inline int insert_tcp_conn_trace(__u32 saddr, __u16 sport, __u32 nat_saddr, __u16 nat_sport){
+static inline int insert_tcp_conn_out_trace(__u32 saddr, __u16 sport, __u32 nat_saddr, __u16 nat_sport){
     sock_peer src_peer = {}; src_peer.addr= saddr;  src_peer.port = sport;
     sock_peer nat_peer = {}; nat_peer.addr= nat_saddr;  nat_peer.port = nat_sport;
 
     sock_peer* old_peer = (sock_peer*)conn_nat_out_map.lookup(&src_peer);
     if(!old_peer || old_peer->conn_key == 0){
         conn_nat_out_map.update(&src_peer, &nat_peer);
-        bpf_trace_printk("iptables nat ret record nat src addr %u:%d\n", src_peer.addr, src_peer.port);
+        bpf_trace_printk("insert_tcp_conn_out_trace nat ret record nat src addr %u:%d\n", src_peer.addr, src_peer.port);
     }
-
     if(nat_peer.conn_key != 0){
         old_peer = conn_nat_out_map.lookup(&nat_peer);
         if(!old_peer ){
             sock_peer zero_peer = {};
             zero_peer.conn_key = 0;
             conn_nat_out_map.update(&nat_peer, &zero_peer);
-            bpf_trace_printk("iptables nat ret record zero nat src addr %u:%d\n", nat_peer.addr, nat_peer.port);
+            bpf_trace_printk("insert_tcp_conn_out_trace nat ret record zero nat src addr %u:%d\n", nat_peer.addr, nat_peer.port);
         }
     }
-
     return 0;
 }
 
-static inline sock_peer* clean_nat_node(sock_peer* cur_node){
+static inline int insert_tcp_conn_in_trace(__u32 saddr, __u16 sport, __u32 nat_saddr, __u16 nat_sport){
+    sock_peer src_peer = {}; src_peer.addr= saddr;  src_peer.port = sport;
+    sock_peer nat_peer = {}; nat_peer.addr= nat_saddr;  nat_peer.port = nat_sport;
+
+    sock_peer* old_peer = (sock_peer*)conn_nat_in_map.lookup(&src_peer);
+    if(!old_peer || old_peer->conn_key == 0){
+        conn_nat_in_map.update(&src_peer, &nat_peer);
+        bpf_trace_printk("insert_tcp_conn_in_trace nat ret record nat src addr %u:%d\n", src_peer.addr, src_peer.port);
+    }
+    if(nat_peer.conn_key != 0){
+        old_peer = conn_nat_in_map.lookup(&nat_peer);
+        if(!old_peer ){
+            sock_peer zero_peer = {};
+            zero_peer.conn_key = 0;
+            conn_nat_in_map.update(&nat_peer, &zero_peer);
+            bpf_trace_printk("insert_tcp_conn_in_trace nat ret record zero nat src addr %u:%d\n", nat_peer.addr, nat_peer.port);
+        }
+    }
+    return 0;
+}
+
+static inline sock_peer* clean_nat_out_node(sock_peer* cur_node){
     sock_peer* next_node = (sock_peer*)conn_nat_out_map.lookup(cur_node);
     if(!next_node) { return 0; }
     
-    bpf_trace_printk("iptables nat ret delete nat src addr %u->%d\n", cur_node->addr, cur_node->port);
+    bpf_trace_printk("iptables nat out ret delete nat src addr %u:%d\n", cur_node->addr, cur_node->port);
     sock_peer temp_peer = *next_node;
     conn_nat_out_map.delete(cur_node);
     *cur_node = temp_peer; //for next
     return next_node;
 }
 
-static inline int clean_tcp_conn_trace(__u32 saddr, __u16 sport){
+static inline sock_peer* clean_nat_in_node(sock_peer* cur_node){
+    sock_peer* next_node = (sock_peer*)conn_nat_in_map.lookup(cur_node);
+    if(!next_node) { return 0; }
+    
+    bpf_trace_printk("iptables nat in ret delete nat src addr %u:%d\n", cur_node->addr, cur_node->port);
+    sock_peer temp_peer = *next_node;
+    conn_nat_out_map.delete(cur_node);
+    *cur_node = temp_peer; //for next
+    return next_node;
+}
+
+static inline int clean_tcp_conn_out_trace(__u32 saddr, __u16 sport){
     sock_peer cur_node = {};
     cur_node.addr = saddr; cur_node.port = sport;
 
-    if(!clean_nat_node(&cur_node)) { return 0;}
-    if(!clean_nat_node(&cur_node)) { return 0;}
-    if(!clean_nat_node(&cur_node)) { return 0;}
-    if(!clean_nat_node(&cur_node)) { return 0;}
-    if(!clean_nat_node(&cur_node)) { return 0;}
-    if(!clean_nat_node(&cur_node)) { return 0;}
-    if(!clean_nat_node(&cur_node)) { return 0;}
-    if(!clean_nat_node(&cur_node)) { return 0;}
-    if(!clean_nat_node(&cur_node)) { return 0;}
-    if(!clean_nat_node(&cur_node)) { return 0;}
-    if(!clean_nat_node(&cur_node)) { return 0;}
-    if(!clean_nat_node(&cur_node)) { return 0;}
-    if(!clean_nat_node(&cur_node)) { return 0;}
-    if(!clean_nat_node(&cur_node)) { return 0;}
-    if(!clean_nat_node(&cur_node)) { return 0;}
-    if(!clean_nat_node(&cur_node)) { return 0;}
+    if(!clean_nat_out_node(&cur_node)) { return 0;}
+    if(!clean_nat_out_node(&cur_node)) { return 0;}
+    if(!clean_nat_out_node(&cur_node)) { return 0;}
+    if(!clean_nat_out_node(&cur_node)) { return 0;}
+    if(!clean_nat_out_node(&cur_node)) { return 0;}
+    if(!clean_nat_out_node(&cur_node)) { return 0;}
+    if(!clean_nat_out_node(&cur_node)) { return 0;}
+    if(!clean_nat_out_node(&cur_node)) { return 0;}
+    if(!clean_nat_out_node(&cur_node)) { return 0;}
+    if(!clean_nat_out_node(&cur_node)) { return 0;}
+    if(!clean_nat_out_node(&cur_node)) { return 0;}
+    if(!clean_nat_out_node(&cur_node)) { return 0;}
+    if(!clean_nat_out_node(&cur_node)) { return 0;}
+    if(!clean_nat_out_node(&cur_node)) { return 0;}
+    if(!clean_nat_out_node(&cur_node)) { return 0;}
+    if(!clean_nat_out_node(&cur_node)) { return 0;}
+
+    return 0;
+}
+
+static inline int clean_tcp_conn_in_trace(__u32 saddr, __u16 sport){
+    sock_peer cur_node = {};
+    cur_node.addr = saddr; cur_node.port = sport;
+
+    if(!clean_nat_in_node(&cur_node)) { return 0;}
+    if(!clean_nat_in_node(&cur_node)) { return 0;}
+    if(!clean_nat_in_node(&cur_node)) { return 0;}
+    if(!clean_nat_in_node(&cur_node)) { return 0;}
+    if(!clean_nat_in_node(&cur_node)) { return 0;}
+    if(!clean_nat_in_node(&cur_node)) { return 0;}
+    if(!clean_nat_in_node(&cur_node)) { return 0;}
+    if(!clean_nat_in_node(&cur_node)) { return 0;}
+    if(!clean_nat_in_node(&cur_node)) { return 0;}
+    if(!clean_nat_in_node(&cur_node)) { return 0;}
+    if(!clean_nat_in_node(&cur_node)) { return 0;}
+    if(!clean_nat_in_node(&cur_node)) { return 0;}
+    if(!clean_nat_in_node(&cur_node)) { return 0;}
+    if(!clean_nat_in_node(&cur_node)) { return 0;}
+    if(!clean_nat_in_node(&cur_node)) { return 0;}
+    if(!clean_nat_in_node(&cur_node)) { return 0;}
 
     return 0;
 }
@@ -416,7 +469,7 @@ static inline int do_trace_state(struct sock *sk, int protocol, int newstate, in
         return 0;
     }
 
-    return clean_tcp_conn_trace(saddr, sport); 
+    return clean_tcp_conn_out_trace(saddr, sport); 
 }
 
 /**
@@ -449,11 +502,8 @@ int tp_sock_inet_sock_set_state(struct tracepoint__sock__inet_sock_set_state *ar
 }
 
 int tp_tcp_tcp_destroy_sock(struct tracepoint__tcp__tcp_destroy_sock *args){
-    sock_peer peer = {}; peer.addr = *(int*)args->daddr; peer.port = bpf_ntohs(args->dport);
-    if(conn_active_map.lookup((u64*)&peer)){
-        bpf_trace_printk("tp_tcp_tcp_destroy_sock, destroy sockt %ld, %u:%d\n", peer.conn_key, peer.addr, peer.port);
-        conn_active_map.delete((u64*)&peer);
-    }
+    sock_peer s_peer = {}; s_peer.addr = *(int*)args->saddr; s_peer.port = bpf_ntohs(args->sport);
+    sock_peer d_peer = {}; d_peer.addr = *(int*)args->daddr; d_peer.port = bpf_ntohs(args->dport);
 
     return 0;
 }
@@ -579,8 +629,15 @@ static inline int store_nf_nat_ipv4_args(struct pt_regs *ctx, void *priv, struct
     if(!filter_skb_tcp_info(&evt, ctx, skb)){
         return 0;
     }
-    u64 sk_p;
-    member_read(&sk_p, skb, sk);
+
+    sock_peer peer = {}; peer.addr = evt.saddr; peer.port = evt.sport;
+    if(ROUTE_EVT_NAT_IN == op_event && !conn_nat_in_map.lookup(&peer)){
+        return 0;
+    } else if(ROUTE_EVT_NAT_OUT == op_event && !conn_nat_out_map.lookup(&peer)) {
+        return 0;
+    } else if (ROUTE_EVT_NAT_OUT == ROUTE_EVT_FORWARD && !conn_nat_in_map.lookup(&peer)){
+        return 0;
+    }
 
     // stash the arguments for use in retprobe
     struct ipt_do_nat_args args = {
@@ -590,11 +647,6 @@ static inline int store_nf_nat_ipv4_args(struct pt_regs *ctx, void *priv, struct
 
     args.src.addr = evt.saddr; args.src.port = evt.sport;
     args.dst.addr = evt.daddr; args.dst.port = evt.dport;
-
-    if (!conn_active_map.lookup((u64*)&args.dst)){
-        bpf_trace_printk("store_nf_nat_ipv4_args, cant't found sk %u:%d, action %u\n", args.dst.addr, args.dst.port, op_event);
-        return 0;
-    }
 
     cur_ipt_do_nat_args.update(&pid_tgid, &args);
 
@@ -638,7 +690,7 @@ int kretp_nf_nat_ipv4_out(struct pt_regs *ctx)
 
     int ret = PT_REGS_RC(ctx);
     if (evt.saddr != args->src.addr || evt.sport != args->src.port){
-        insert_tcp_conn_trace(args->src.addr, args->src.port, evt.saddr, evt.sport);
+        insert_tcp_conn_out_trace(args->src.addr, args->src.port, evt.saddr, evt.sport);
         
         evt.daddr = evt.saddr; evt.dport = evt.sport;
         evt.saddr = args->src.addr;  evt.sport = args->src.port;
@@ -749,7 +801,7 @@ int kp_tcp_connect(struct pt_regs *ctx, struct sock *sk) {
         return 0;
     }
 
-    if(!conn_conn_out_map.lookup(&pid_tgid)){
+    if(!conn_conn_args_map.lookup(&pid_tgid)){
         struct sock_common sock_comm;
         member_read(&sock_comm, sk, __sk_common);
         struct conn_status_args status = {};
@@ -761,13 +813,10 @@ int kp_tcp_connect(struct pt_regs *ctx, struct sock *sk) {
             return 0;
         }
 
-        insert_tcp_conn_trace(evt.saddr, evt.sport, 0, 0);
-        conn_conn_out_map.update(&pid_tgid, &status);
-        u64 flag = 0;
-        
-        sock_peer peer = {}; peer.addr = sock_comm.skc_daddr;  peer.port = sock_comm.skc_dport;
-        conn_active_map.update((u64*)&peer, &flag);
-        bpf_trace_printk("tcp_connect, insert sockt %ld, %u:%d\n", peer.conn_key, peer.addr, peer.port);
+        insert_tcp_conn_out_trace(evt.saddr, evt.sport, 0, 0);
+        conn_conn_args_map.update(&pid_tgid, &status);
+
+        bpf_trace_printk("tcp_connect, insert sockt %u:%d\n", evt.saddr, evt.sport);
     }
     
     return 0;
@@ -784,9 +833,9 @@ int kretp___sys_connect(struct pt_regs *ctx) {
     u32 k_pid = pid_tgid & 0xFFFFFFFF;
     u32 pid = pid_tgid >> 32;
 
-    struct conn_status_args* status = (struct conn_status_args*)conn_conn_out_map.lookup(&pid_tgid);
+    struct conn_status_args* status = (struct conn_status_args*)conn_conn_args_map.lookup(&pid_tgid);
     if(!status) { return 0;}
-    conn_conn_out_map.delete(&pid_tgid);
+    conn_conn_args_map.delete(&pid_tgid);
 
     int retval = PT_REGS_RC(ctx);
     if(!retval){
@@ -797,7 +846,10 @@ int kretp___sys_connect(struct pt_regs *ctx) {
         .event_flags = ROUTE_EVT_CONNECT,
         .pid  = pid,
         .tgid  = k_pid,
+        .ip_version = 4,
     };
+
+    clean_tcp_conn_out_trace(status->addr, status->port);
 
     bpf_get_current_comm(evt.comm_name, sizeof(evt.comm_name));
     evt.daddr = status->addr; evt.dport = status->port;
@@ -809,12 +861,46 @@ int kretp___sys_connect(struct pt_regs *ctx) {
 }
 
 int kp_inet_csk_accept(struct pt_regs *ctx, struct sock *sk, int flags, int *err, bool kern){
+    struct inet_sock *inet = inet_sk(sk);
+    u64 pid_tgid = bpf_get_current_pid_tgid();
+    u32 k_pid = pid_tgid & 0xFFFFFFFF;
+    u32 pid = pid_tgid >> 32;
+
+    struct sock_common sock_comm;
+    member_read(&sock_comm, sk, __sk_common);
+    
+    if(sock_comm.skc_daddr != CONTAINER_FILTER){
+        return 0;
+    }
+
+    if(!conn_conn_args_map.lookup(&pid_tgid)){
+        struct conn_status_args status = {};
+        member_read(&status.addr, inet, inet_saddr);
+        member_read(&status.port, inet, inet_sport);
+        status.start = bpf_ktime_get_ns();
+
+        insert_tcp_conn_in_trace(status.addr, status.port, 0, 0);
+        conn_conn_args_map.update(&pid_tgid, &status);
+        
+        bpf_trace_printk("inet_csk_accept, insert sockt, %u:%d\n", status.addr, status.port);
+    }
+
+
     return 0;
 }
 
-int kretp_inet_csk_accept(struct pt_regs *ctx, struct sock *sk, int flags, int *err, bool kern){
+int kretp_inet_csk_accept(struct pt_regs *ctx){
+    u64 pid_tgid = bpf_get_current_pid_tgid();
+    u32 k_pid = pid_tgid & 0xFFFFFFFF;
+    u32 pid = pid_tgid >> 32;
+
+    struct conn_status_args* status = (struct conn_status_args*)conn_conn_args_map.lookup(&pid_tgid);
+    if(!status) { return 0;}
+    conn_conn_args_map.delete(&pid_tgid);
+
     struct sock *newsk = (struct sock *)PT_REGS_RC(ctx);
     if (!newsk){
+        clean_tcp_conn_in_trace(status->addr, status->port);
         return 0;
     }
     
@@ -829,6 +915,13 @@ int kp_tcp_recvmsg(struct pt_regs *ctx, struct sock *sk, struct msghdr *msg, siz
 		int event_flags, int *addr_len){
     u64 pid_tgid = bpf_get_current_pid_tgid();
     struct inet_sock *inet = inet_sk(sk);
+
+    struct ipv6_pinfo	*pinet6;
+    member_read(&pinet6, inet, pinet6);
+    if (pinet6){
+        return 0;
+    }
+
     u32 inet_saddr;
     u16 inet_sport;
     member_read(&inet_saddr, inet, inet_saddr);
@@ -870,6 +963,7 @@ int kretp_tcp_recvmsg(struct pt_regs *ctx) {
         .event_flags = ROUTE_EVT_READ,
         .pid  = pid,
         .tgid  = k_pid,
+        .ip_version = 4,
     };
 
     bpf_get_current_comm(evt.comm_name, sizeof(evt.comm_name));
