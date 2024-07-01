@@ -33,12 +33,36 @@ HOOKNAMES = [
     "POSTROUTING",
 ]
 
-ROUTE_EVT_IF = 1<<0
-ROUTE_EVT_IPTABLE = 1<<1
-ROUTE_EVT_NAT = 1<<2
-ROUTE_EVT_CONNECT = 1<<3
-ROUTE_EVT_READ = 1<<4
-ROUTE_EVT_WRITE = 1<<5
+
+class Evt(object):
+    ROUTE_EVT_IF_RX     = (1<<0)
+    ROUTE_EVT_IF_NAPI_R = (1<<1)
+    ROUTE_EVT_IF_SKB_R  = (1<<2)
+    ROUTE_EVT_IF_DEV_W  = (1<<3)
+    ROUTE_EVT_IPTABLE   = (1<<4)
+    ROUTE_EVT_NAT_IN    = (1<<5)
+    ROUTE_EVT_NAT_OUT   = (1<<6)
+    ROUTE_EVT_CONNECT   = (1<<7)
+    ROUTE_EVT_ACCEPT    = (1<<8)
+    ROUTE_EVT_READ      = (1<<9)
+    ROUTE_EVT_WRITE     = (1<<10)
+    
+    
+    ROUTE_D_OUT = (1<<23)
+    
+    e_maps  = {
+        ROUTE_EVT_IF_RX:        'IF_RX',
+        ROUTE_EVT_IF_NAPI_R:    'NAPI_R',
+        ROUTE_EVT_IF_SKB_R:     'SKB_R',
+        ROUTE_EVT_IF_DEV_W:     'DEV_W',
+        ROUTE_EVT_IPTABLE:      'D_IPT',
+        ROUTE_EVT_NAT_IN:       'NAT_IN',
+        ROUTE_EVT_NAT_OUT:      'NAT_OUT',
+        ROUTE_EVT_CONNECT:      'CONNECT',
+        ROUTE_EVT_ACCEPT:       'ACCEPT',
+        ROUTE_EVT_READ:         'U_R',
+        ROUTE_EVT_WRITE:        'U_W',
+    }   
 
 class PkgEvtUnion(ct.Union):
     _fields_ = [
@@ -95,36 +119,39 @@ def format_tcp_flags(flags):
 
 
 def event_error_handler(event, formatted_datetime):
-    if not event.event_flags & (ROUTE_EVT_CONNECT|ROUTE_EVT_READ|ROUTE_EVT_WRITE):
+    if not event.event_flags & (Evt.ROUTE_EVT_CONNECT|Evt.ROUTE_EVT_READ|Evt.ROUTE_EVT_WRITE):
         return
+    
+    event_flags = event.event_flags
+    event_flags = event_flags & ~Evt.ROUTE_D_OUT
 
     daddr = inet_ntop(AF_INET, pack("=I", event.daddr))
     data_len = "%s:%s" % (event.ip_payload_len, event.tcp_payload_len)
     info = "ret:%-4d, time %.1f" % (event.data_union.data[0], event.data_union.data[1]/1000)
-    if event.event_flags & ROUTE_EVT_CONNECT:
+    if event_flags & Evt.ROUTE_EVT_CONNECT:
         flow = "%s:%s -> %s:%s" % ('localip', 'connect', daddr, ntohs(event.dport))
-        print("[%-20s] %-16s %-42s %-34s %-2d %-12s %-10s %-64s" % (formatted_datetime, event.ifname, flow, \
-            info, event.event_flags, format_tcp_flags(event.tcp_flags), data_len, event.comm_name))
-    elif event.event_flags & ROUTE_EVT_READ:
+    elif event_flags & Evt.ROUTE_EVT_READ:
         flow = "%s:%s -> %s:%s" % ('localip', 'read', daddr, ntohs(event.dport))
-        print("[%-20s] %-16s %-42s %-34s %-2d %-12s %-10s %-64s" % (formatted_datetime, event.ifname, flow, \
-            info, event.event_flags, format_tcp_flags(event.tcp_flags), data_len, event.comm_name))
-    elif event.event_flags & ROUTE_EVT_WRITE:
+    elif event_flags & Evt.ROUTE_EVT_WRITE:
         flow = "%s:%s -> %s:%s" % ('localip', 'write', daddr, ntohs(event.dport))
-        print("[%-20s] %-16s %-42s %-34s %-2d %-12s %-10s %-64s" % (formatted_datetime, event.ifname, flow,
-            iptables, event.event_flags, format_tcp_flags(event.tcp_flags), data_len, event.comm_name))
+        
+    print("[%-20s] %-16s %-42s %-34s %-6s %-12s %-10s %-24s" % (formatted_datetime, event.ifname, flow,
+        info, Evt.e_maps[event.event_flags], format_tcp_flags(event.tcp_flags), data_len, event.comm_name))
         
 
 def event_handler(cpu, data, size):
     # Decode event
     event = ct.cast(data, ct.POINTER(PkgEvt)).contents
+    event_flags = event.event_flags
+    event_flags = event_flags & ~Evt.ROUTE_D_OUT
+    
     now = datetime.now()
     formatted_datetime = now.strftime("%D %H:%M:%S.%f")[:-3]
     event_error_handler(event, formatted_datetime)
 
     # Make sure this is an interface event
-    if event.event_flags & ROUTE_EVT_IF != ROUTE_EVT_IF:
-        #print("event_handler event_flags=%s skip" % event.event_flags)
+    if Evt.e_maps.get(event_flags) is None:
+        print("event_handler event_flags=%s skip" % event_flags)
         return
 
     # Decode address
@@ -144,8 +171,9 @@ def event_handler(cpu, data, size):
     # Optionally decode iptables events
     iptables = ""
     unknow = "~UNK~"
-    if event.event_flags & ROUTE_EVT_IPTABLE == ROUTE_EVT_IPTABLE or \
-            event.event_flags & ROUTE_EVT_NAT == ROUTE_EVT_NAT:
+    if event_flags & Evt.ROUTE_EVT_IPTABLE or \
+            event_flags & Evt.ROUTE_EVT_NAT_IN or \
+            event_flags & Evt.ROUTE_EVT_NAT_OUT :
         verdict = _get(NF_VERDICT_NAME, event.verdict, unknow)
         hook = _get(HOOKNAMES, event.hook, unknow)
         if hook == unknow:
@@ -155,8 +183,8 @@ def event_handler(cpu, data, size):
         iptables = "                                  "
     data_len = "%s:%s" % (event.ip_payload_len, event.tcp_payload_len)
     # Print event
-    print("[%-20s] %-16s %-42s %-34s %-2d %-12s %-10s %-64s" % (formatted_datetime, event.ifname, flow, \
-        iptables, event.event_flags, format_tcp_flags(event.tcp_flags), data_len, event.comm_name))
+    print("[%-20s] %-16s %-42s %-34s %-6s %-12s %-10s %-24s" % (formatted_datetime, event.ifname, flow, \
+        iptables, Evt.e_maps[event_flags], format_tcp_flags(event.tcp_flags), data_len, event.comm_name))
 
 def attch_all_probe(enable_ipv6=False):
     b.attach_kprobe(event='ipt_do_table', fn_name='kp_ipt_do_table')
@@ -169,8 +197,8 @@ def attch_all_probe(enable_ipv6=False):
     b.attach_kprobe(event='nf_nat_ipv4_out', fn_name='kp_nf_nat_ipv4_out')
     b.attach_kretprobe(event='nf_nat_ipv4_out', fn_name='kretp_nf_nat_ipv4_out')
 
-    #b.attach_kprobe(event='nf_nat_ipv4_in', fn_name='kp_nf_nat_ipv4_in')
-    #b.attach_kretprobe(event='nf_nat_ipv4_in', fn_name='kretp_nf_nat_ipv4_in')
+    b.attach_kprobe(event='nf_nat_ipv4_in', fn_name='kp_nf_nat_ipv4_in')
+    b.attach_kretprobe(event='nf_nat_ipv4_in', fn_name='kretp_nf_nat_ipv4_in')
 
     #b.attach_kprobe(event='ip_forward', fn_name='kp_ip_forward')
     #b.attach_kretprobe(event='ip_forward', fn_name='kretp_ip_forward')
@@ -179,9 +207,12 @@ def attch_all_probe(enable_ipv6=False):
 
     #b.attach_kprobe(event='__sys_connect', fn_name='kp___sys_connect')
     b.attach_kretprobe(event='__sys_connect', fn_name='kretp___sys_connect')
+    
+    b.attach_kprobe(event='tcp_connect', fn_name='kp_tcp_connect')
+    b.attach_kretprobe(event='tcp_connect', fn_name='kp_tcp_connect')
 
-    b.attach_kprobe(event='tcp_recvmsg', fn_name='kp_tcp_recvmsg')
-    b.attach_kretprobe(event='tcp_recvmsg', fn_name='kretp_tcp_recvmsg')
+    b.attach_kprobe(event='inet_csk_accept', fn_name='kp_inet_csk_accept')
+    b.attach_kretprobe(event='inet_csk_accept', fn_name='kretp_inet_csk_accept')
 
     #b.attach_kprobe(event='tcp_retransmit_skb', fn_name='kp_tcp_retransmit_skb')
     #b.attach_kretprobe(event='tcp_retransmit_skb', fn_name='kretp_tcp_retransmit_skb')
@@ -283,7 +314,7 @@ if __name__ == "__main__":
     #b.load_funcs(BPF.CGROUP_SKB)
     b["route_evt"].open_perf_buffer(event_handler)
 
-    print("%-23s %-16s %-42s %-34s %2s %-10s %-10s %-13s" % ('TIMESTAMP', 'INTERFACE', 'ADDRESSES', 'IPTABLES', 'OP', 'TCP_FLAGS', 'SIZE(IP:TCP)', 'COMMON_NAME'))
+    print("%-23s %-16s %-42s %-34s %-6s %-10s %-10s %-13s" % ('TIMESTAMP', 'INTERFACE', 'ADDRESSES', 'IPTABLES', 'EVENT', 'TCP_FLAGS', 'SIZE(IP:TCP)', 'COMMON_NAME'))
 
     while 1:
         try:

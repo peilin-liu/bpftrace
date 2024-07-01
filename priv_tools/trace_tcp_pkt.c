@@ -11,15 +11,27 @@
 #define bpf_trace_printk(...) 
 #endif
 
-#define ROUTE_EVT_IF (1<<0)
-#define ROUTE_EVT_IPTABLE (1<<1)
-#define ROUTE_EVT_NAT (1<<2)
-#define ROUTE_EVT_CONNECT (1<<3)
-#define ROUTE_EVT_READ (1<<4)
-#define ROUTE_EVT_WRITE (1<<5)
+#define ROUTE_EVT_IF_RX     (1<<0)
+#define ROUTE_EVT_IF_NAPI_R (1<<1)
+#define ROUTE_EVT_IF_SKB_R  (1<<2)
+#define ROUTE_EVT_IF_DEV_W  (1<<3)
+#define ROUTE_EVT_IPTABLE   (1<<4)
+#define ROUTE_EVT_NAT_IN    (1<<5)
+#define ROUTE_EVT_NAT_OUT   (1<<6)
+#define ROUTE_EVT_CONNECT   (1<<7)
+#define ROUTE_EVT_ACCEPT    (1<<8)
+#define ROUTE_EVT_READ      (1<<9)
+#define ROUTE_EVT_WRITE     (1<<10)
+#define ROUTE_EVT_FORWARD   (1<<11)
+
+
+
+#define ROUTE_D_OUT   (1<<23)
+
 
 #define TRUE 1
 #define FALSE 0
+
 // Event structure
 struct route_evt_t {
     /* Content event_flags */
@@ -40,7 +52,6 @@ struct route_evt_t {
     u64 pid;
     u64 tgid;
 
-
     /* Iptables trace */
     u64 hook;
     u64 verdict;
@@ -55,9 +66,14 @@ BPF_PERF_OUTPUT(route_evt);
 
 
 typedef union  {
-    u32 addr_port[2];
+    struct
+    {
+        u32 addr;
+        u16 port;
+        u16 res1;
+    };
     u64 conn_key;
-} addr_port;
+} sock_peer;
 
 // Arg stash structure
 struct ipt_do_table_args
@@ -70,8 +86,8 @@ struct ipt_do_nat_args
 {
     struct sk_buff *skb;
     const struct nf_hook_state *state;
-    addr_port src;
-    addr_port dst;
+    sock_peer src;
+    sock_peer dst;
 };
 
 struct conn_status_args
@@ -83,8 +99,10 @@ struct conn_status_args
 
 BPF_HASH(cur_ipt_do_table_args, u64, struct ipt_do_table_args);
 BPF_HASH(cur_ipt_do_nat_args, u64, struct ipt_do_nat_args);
-BPF_HASH(conn_nat_map, addr_port, addr_port);
-BPF_HASH(conn_status_map, u64, struct conn_status_args);
+BPF_HASH(conn_nat_out_map, sock_peer, sock_peer);
+BPF_HASH(conn_nat_in_map, sock_peer, sock_peer);
+BPF_HASH(conn_conn_out_map, u64, struct conn_status_args);
+BPF_HASH(conn_conn_in_map, u64, struct conn_status_args);
 BPF_HASH(conn_rw_map, u64, struct conn_status_args);
 BPF_HASH(conn_active_map, u64, u64);
 
@@ -140,13 +158,13 @@ static inline int filter_connect_dst(__be64	daddr, __be16 dport){
 static inline int filter_host_port(__be64 saddr, __be64	daddr,
                                    __be16 sport, __be16 dport)
 {    
-    addr_port src;
-    addr_port dst;
+    sock_peer src = {};
+    sock_peer dst = {};
 
-    src.addr_port[0]=saddr; src.addr_port[1]=sport;
-    dst.addr_port[0]=daddr; dst.addr_port[1]=dport;
+    src.addr=saddr; src.port=sport;
+    dst.addr=daddr; dst.port=dport;
     
-    if(!conn_nat_map.lookup(&src) && !conn_nat_map.lookup(&dst) && 
+    if(!conn_nat_out_map.lookup(&src) && !conn_nat_out_map.lookup(&dst) && 
         daddr != CONTAINER_FILTER && saddr != CONTAINER_FILTER) {
         return FALSE;
     }
@@ -281,11 +299,8 @@ static inline int filter_skb_tcp_info(struct route_evt_t *evt, void *ctx, struct
   * Common tracepoint handler. Detect TCP over IPv4/IPv6 request and replies
   * emit event with address,port interface and namespace.
   */
-static inline int do_trace_skb(struct route_evt_t *evt, void *ctx, struct sk_buff *skb)
+static inline int do_trace_skb(struct route_evt_t *evt, void *ctx, struct sk_buff *skb, __u32 op_evt)
 {
-    // Prepare event for userland
-    evt->event_flags |= ROUTE_EVT_IF;
-
     if(!filter_skb_tcp_info(evt, ctx, skb)){
         return FALSE;
     }
@@ -295,9 +310,6 @@ static inline int do_trace_skb(struct route_evt_t *evt, void *ctx, struct sk_buf
 
 static inline int do_force_trace_skb(struct route_evt_t *evt, void *ctx, struct sk_buff *skb)
 {
-    // Prepare event for userland
-    evt->event_flags |= ROUTE_EVT_IF;
-
     int err = parse_skb_tcp_info(evt, ctx, skb);
     if(err){ 
         //bpf_trace_printk("do_force_trace_skb, parse_skb_tcp_info err %d, %ld:%d\n", err, evt->sport, evt->dport);
@@ -307,7 +319,7 @@ static inline int do_force_trace_skb(struct route_evt_t *evt, void *ctx, struct 
     return TRUE;
 }
 
-static inline int do_trace(void *ctx, struct sk_buff *skb)
+static inline int do_trace(void *ctx, struct sk_buff *skb, __u32 op_evt)
 {
     //check target
     u64 pid_tgid = bpf_get_current_pid_tgid();
@@ -317,11 +329,11 @@ static inline int do_trace(void *ctx, struct sk_buff *skb)
     PROCESS_FILTER
 
     // Prepare event for userland
-    struct route_evt_t evt = {.pid = pid, .tgid  = k_pid, };
+    struct route_evt_t evt = {.event_flags = op_evt, .pid = pid, .tgid  = k_pid, };
     bpf_get_current_comm(evt.comm_name, sizeof(evt.comm_name));
 
     // Process packet
-    if (!do_trace_skb(&evt, ctx, skb)){
+    if (!do_trace_skb(&evt, ctx, skb, op_evt)){
         return 0;
     }
 
@@ -333,42 +345,42 @@ static inline int do_trace(void *ctx, struct sk_buff *skb)
 }
 
 static inline int insert_tcp_conn_trace(__u32 saddr, __u16 sport, __u32 nat_saddr, __u16 nat_sport){
-    addr_port src_a_p; src_a_p.addr_port[0]= saddr;  src_a_p.addr_port[1] = sport;
-    addr_port nat_a_p; nat_a_p.addr_port[0]= nat_saddr;  nat_a_p.addr_port[1] = nat_sport;
+    sock_peer src_peer = {}; src_peer.addr= saddr;  src_peer.port = sport;
+    sock_peer nat_peer = {}; nat_peer.addr= nat_saddr;  nat_peer.port = nat_sport;
 
-    addr_port* old_a_p = (addr_port*)conn_nat_map.lookup(&src_a_p);
-    if(!old_a_p || old_a_p->conn_key == 0){
-        conn_nat_map.update(&src_a_p, &nat_a_p);
-        bpf_trace_printk("iptables nat ret record nat src addr %u:%d\n", src_a_p.addr_port[0], src_a_p.addr_port[1]);
+    sock_peer* old_peer = (sock_peer*)conn_nat_out_map.lookup(&src_peer);
+    if(!old_peer || old_peer->conn_key == 0){
+        conn_nat_out_map.update(&src_peer, &nat_peer);
+        bpf_trace_printk("iptables nat ret record nat src addr %u:%d\n", src_peer.addr, src_peer.port);
     }
 
-    if(nat_a_p.conn_key != 0){
-        old_a_p = conn_nat_map.lookup(&nat_a_p);
-        if(!old_a_p ){
-            addr_port zero_a_p;
-            zero_a_p.conn_key = 0;
-            conn_nat_map.update(&nat_a_p, &zero_a_p);
-            bpf_trace_printk("iptables nat ret record zero nat src addr %u:%d\n", nat_a_p.addr_port[0], nat_a_p.addr_port[1]);
+    if(nat_peer.conn_key != 0){
+        old_peer = conn_nat_out_map.lookup(&nat_peer);
+        if(!old_peer ){
+            sock_peer zero_peer = {};
+            zero_peer.conn_key = 0;
+            conn_nat_out_map.update(&nat_peer, &zero_peer);
+            bpf_trace_printk("iptables nat ret record zero nat src addr %u:%d\n", nat_peer.addr, nat_peer.port);
         }
     }
 
     return 0;
 }
 
-static inline addr_port* clean_nat_node(addr_port* cur_node){
-    addr_port* next_node = (addr_port*)conn_nat_map.lookup(cur_node);
+static inline sock_peer* clean_nat_node(sock_peer* cur_node){
+    sock_peer* next_node = (sock_peer*)conn_nat_out_map.lookup(cur_node);
     if(!next_node) { return 0; }
     
-    bpf_trace_printk("iptables nat ret delete nat src addr %u->%d\n", cur_node->addr_port[0], cur_node->addr_port[1]);
-    addr_port temp_a_p = *next_node;
-    conn_nat_map.delete(cur_node);
-    *cur_node = temp_a_p; //for next
+    bpf_trace_printk("iptables nat ret delete nat src addr %u->%d\n", cur_node->addr, cur_node->port);
+    sock_peer temp_peer = *next_node;
+    conn_nat_out_map.delete(cur_node);
+    *cur_node = temp_peer; //for next
     return next_node;
 }
 
 static inline int clean_tcp_conn_trace(__u32 saddr, __u16 sport){
-    addr_port cur_node = {};
-    cur_node.addr_port[0] = saddr; cur_node.addr_port[1] = sport;
+    sock_peer cur_node = {};
+    cur_node.addr = saddr; cur_node.port = sport;
 
     if(!clean_nat_node(&cur_node)) { return 0;}
     if(!clean_nat_node(&cur_node)) { return 0;}
@@ -410,25 +422,24 @@ static inline int do_trace_state(struct sock *sk, int protocol, int newstate, in
 /**
  * Attach to Kernel Interface Tracepoints
  */
-
 int tp_net_netif_rx(struct tracepoint__net__netif_rx *args)
-{
-    return do_trace(args, (struct sk_buff *)args->skbaddr);
-}
-
-int tp_net_net_dev_queue(struct tracepoint__net__net_dev_queue *args)
-{
-    return do_trace(args, (struct sk_buff *)args->skbaddr);
+{    
+    return do_trace(args, (struct sk_buff *)args->skbaddr, ROUTE_EVT_IF_RX);
 }
 
 int tp_net_napi_gro_receive_entry(struct tracepoint__net__napi_gro_receive_entry *args)
 {
-    return do_trace(args, (struct sk_buff *)args->skbaddr);
+    return do_trace(args, (struct sk_buff *)args->skbaddr, ROUTE_EVT_IF_NAPI_R);
 }
 
 int tp_net_netif_receive_skb_entry(struct tracepoint__net__netif_receive_skb_entry *args)
 {
-    return do_trace(args, (struct sk_buff *)args->skbaddr);
+    return do_trace(args, (struct sk_buff *)args->skbaddr, ROUTE_EVT_IF_SKB_R);
+}
+
+int tp_net_net_dev_queue(struct tracepoint__net__net_dev_queue *args)
+{
+    return do_trace(args, (struct sk_buff *)args->skbaddr, ROUTE_EVT_IF_DEV_W|ROUTE_D_OUT);
 }
 
 int tp_sock_inet_sock_set_state(struct tracepoint__sock__inet_sock_set_state *args){
@@ -438,11 +449,10 @@ int tp_sock_inet_sock_set_state(struct tracepoint__sock__inet_sock_set_state *ar
 }
 
 int tp_tcp_tcp_destroy_sock(struct tracepoint__tcp__tcp_destroy_sock *args){
-    addr_port a_p; a_p.addr_port[0] = *(int*)args->daddr; a_p.addr_port[1] = bpf_ntohs(args->dport);
-    //a_p.addr_port[0] = bpf_ntohl(a_p.addr_port[0]); 
-    if(conn_active_map.lookup((u64*)&a_p)){
-        bpf_trace_printk("tp_tcp_tcp_destroy_sock, destroy sockt %ld, %u:%d\n", a_p.conn_key, a_p.addr_port[0], a_p.addr_port[1]);
-        conn_active_map.delete((u64*)&a_p);
+    sock_peer peer = {}; peer.addr = *(int*)args->daddr; peer.port = bpf_ntohs(args->dport);
+    if(conn_active_map.lookup((u64*)&peer)){
+        bpf_trace_printk("tp_tcp_tcp_destroy_sock, destroy sockt %ld, %u:%d\n", peer.conn_key, peer.addr, peer.port);
+        conn_active_map.delete((u64*)&peer);
     }
 
     return 0;
@@ -466,7 +476,7 @@ static inline int __ipt_do_table_in(struct pt_regs *ctx, struct sk_buff *skb, co
         .tgid  = k_pid,
     };
 
-    if(!do_trace_skb(&evt, ctx, skb)){
+    if(!do_trace_skb(&evt, ctx, skb, ROUTE_EVT_IPTABLE)){
         return 0;
     }
 
@@ -555,13 +565,13 @@ int kretp_ip6t_do_table(struct pt_regs *ctx)
 }
 #endif
 
-static inline int store_nf_nat_ipv4_args(struct pt_regs *ctx, void *priv, struct sk_buff *skb, const struct nf_hook_state *state, char* logkey){
+static inline int store_nf_nat_ipv4_args(struct pt_regs *ctx, void *priv, struct sk_buff *skb, const struct nf_hook_state *state, __u32 op_event){
     u64 pid_tgid = bpf_get_current_pid_tgid();
     u32 k_pid = pid_tgid & 0xFFFFFFFF;
     u32 pid = pid_tgid >> 32;
 
     struct route_evt_t evt = {
-        .event_flags = ROUTE_EVT_NAT,
+        .event_flags = op_event,
         .pid  = pid,
         .tgid  = k_pid,
     };
@@ -578,11 +588,11 @@ static inline int store_nf_nat_ipv4_args(struct pt_regs *ctx, void *priv, struct
         .skb = skb
     };
 
-    args.src.addr_port[0] = evt.saddr; args.src.addr_port[1] = evt.sport;
-    args.dst.addr_port[0] = evt.daddr; args.dst.addr_port[1] = evt.dport;
+    args.src.addr = evt.saddr; args.src.port = evt.sport;
+    args.dst.addr = evt.daddr; args.dst.port = evt.dport;
 
     if (!conn_active_map.lookup((u64*)&args.dst)){
-        bpf_trace_printk("store_nf_nat_ipv4_args, cant't found sk %u:%d, action %s\n", args.dst.addr_port[0], args.dst.addr_port[1], logkey);
+        bpf_trace_printk("store_nf_nat_ipv4_args, cant't found sk %u:%d, action %u\n", args.dst.addr, args.dst.port, op_event);
         return 0;
     }
 
@@ -592,18 +602,15 @@ static inline int store_nf_nat_ipv4_args(struct pt_regs *ctx, void *priv, struct
 }
 
 int kp_nf_nat_ipv4_in(struct pt_regs *ctx, void *priv, struct sk_buff *skb, const struct nf_hook_state *state) {
-    char p[] = "natin";
-    return store_nf_nat_ipv4_args(ctx, priv, skb, state, p);
+    return store_nf_nat_ipv4_args(ctx, priv, skb, state, ROUTE_EVT_NAT_IN);
 } 
 
 int kp_nf_nat_ipv4_out(struct pt_regs *ctx, void *priv, struct sk_buff *skb, const struct nf_hook_state *state) {
-    char p[] = "natout";
-    return store_nf_nat_ipv4_args(ctx, priv, skb, state, p);
+    return store_nf_nat_ipv4_args(ctx, priv, skb, state, ROUTE_EVT_NAT_OUT);
 } 
 
 int kp_ip_forward(struct pt_regs *ctx, struct sk_buff *skb) {
-    char p[] = "foward";
-    return store_nf_nat_ipv4_args(ctx, (void*)0, skb, (void*)0, p);
+    return store_nf_nat_ipv4_args(ctx, (void*)0, skb, (void*)0, ROUTE_EVT_FORWARD);
 }
 
 int kretp_nf_nat_ipv4_out(struct pt_regs *ctx)
@@ -620,7 +627,7 @@ int kretp_nf_nat_ipv4_out(struct pt_regs *ctx)
     cur_ipt_do_nat_args.delete(&pid_tgid);
     struct sk_buff *skb = args->skb;
     struct route_evt_t evt = {
-        .event_flags = ROUTE_EVT_NAT,
+        .event_flags = ROUTE_EVT_NAT_OUT,
         .pid  = pid,
         .tgid  = k_pid,
     };
@@ -630,11 +637,11 @@ int kretp_nf_nat_ipv4_out(struct pt_regs *ctx)
     }
 
     int ret = PT_REGS_RC(ctx);
-    if (evt.saddr != args->src.addr_port[0] || evt.sport != args->src.addr_port[1]){
-        insert_tcp_conn_trace(args->src.addr_port[0], args->src.addr_port[1], evt.saddr, evt.sport);
+    if (evt.saddr != args->src.addr || evt.sport != args->src.port){
+        insert_tcp_conn_trace(args->src.addr, args->src.port, evt.saddr, evt.sport);
         
         evt.daddr = evt.saddr; evt.dport = evt.sport;
-        evt.saddr = args->src.addr_port[0];  evt.sport = args->src.addr_port[1];
+        evt.saddr = args->src.addr;  evt.sport = args->src.port;
         sprintf(evt.tablename, "%s", "snatlog");
     } else if (ret != NF_DROP) {
         return 0;
@@ -665,7 +672,7 @@ int kretp_nf_nat_ipv4_in(struct pt_regs *ctx)
     cur_ipt_do_nat_args.delete(&pid_tgid);
     struct sk_buff *skb = args->skb;
     struct route_evt_t evt = {
-        .event_flags = ROUTE_EVT_NAT,
+        .event_flags = ROUTE_EVT_NAT_IN,
         .pid  = pid,
         .tgid  = k_pid,
     };
@@ -700,7 +707,7 @@ int kretp_ip_forward(struct pt_regs *ctx) {
     cur_ipt_do_nat_args.delete(&pid_tgid);
     struct sk_buff *skb = args->skb;
     struct route_evt_t evt = {
-        .event_flags = ROUTE_EVT_NAT,
+        .event_flags = ROUTE_EVT_FORWARD,
         .pid  = pid,
         .tgid  = k_pid,
     };
@@ -742,7 +749,7 @@ int kp_tcp_connect(struct pt_regs *ctx, struct sock *sk) {
         return 0;
     }
 
-    if(!conn_status_map.lookup(&pid_tgid)){
+    if(!conn_conn_out_map.lookup(&pid_tgid)){
         struct sock_common sock_comm;
         member_read(&sock_comm, sk, __sk_common);
         struct conn_status_args status = {};
@@ -755,12 +762,12 @@ int kp_tcp_connect(struct pt_regs *ctx, struct sock *sk) {
         }
 
         insert_tcp_conn_trace(evt.saddr, evt.sport, 0, 0);
-        conn_status_map.update(&pid_tgid, &status);
+        conn_conn_out_map.update(&pid_tgid, &status);
         u64 flag = 0;
         
-        addr_port a_p; a_p.addr_port[0] = sock_comm.skc_daddr;  a_p.addr_port[1] = sock_comm.skc_dport;
-        conn_active_map.update((u64*)&a_p, &flag);
-        bpf_trace_printk("tcp_connect, insert sockt %ld, %u:%d\n", a_p.conn_key, a_p.addr_port[0], a_p.addr_port[1]);
+        sock_peer peer = {}; peer.addr = sock_comm.skc_daddr;  peer.port = sock_comm.skc_dport;
+        conn_active_map.update((u64*)&peer, &flag);
+        bpf_trace_printk("tcp_connect, insert sockt %ld, %u:%d\n", peer.conn_key, peer.addr, peer.port);
     }
     
     return 0;
@@ -777,9 +784,9 @@ int kretp___sys_connect(struct pt_regs *ctx) {
     u32 k_pid = pid_tgid & 0xFFFFFFFF;
     u32 pid = pid_tgid >> 32;
 
-    struct conn_status_args* status = (struct conn_status_args*)conn_status_map.lookup(&pid_tgid);
+    struct conn_status_args* status = (struct conn_status_args*)conn_conn_out_map.lookup(&pid_tgid);
     if(!status) { return 0;}
-    conn_status_map.delete(&pid_tgid);
+    conn_conn_out_map.delete(&pid_tgid);
 
     int retval = PT_REGS_RC(ctx);
     if(!retval){
@@ -801,6 +808,23 @@ int kretp___sys_connect(struct pt_regs *ctx) {
     return 0;
 }
 
+int kp_inet_csk_accept(struct pt_regs *ctx, struct sock *sk, int flags, int *err, bool kern){
+    return 0;
+}
+
+int kretp_inet_csk_accept(struct pt_regs *ctx, struct sock *sk, int flags, int *err, bool kern){
+    struct sock *newsk = (struct sock *)PT_REGS_RC(ctx);
+    if (!newsk){
+        return 0;
+    }
+    
+    struct sock_common sock_comm;
+    member_read(&sock_comm, newsk, __sk_common);
+    
+    bpf_trace_printk("inet_csk_accept, accept new socket, %u:%d\n", sock_comm.skc_daddr, sock_comm.skc_dport);
+    return 0;
+}
+
 int kp_tcp_recvmsg(struct pt_regs *ctx, struct sock *sk, struct msghdr *msg, size_t len, int nonblock,
 		int event_flags, int *addr_len){
     u64 pid_tgid = bpf_get_current_pid_tgid();
@@ -810,9 +834,9 @@ int kp_tcp_recvmsg(struct pt_regs *ctx, struct sock *sk, struct msghdr *msg, siz
     member_read(&inet_saddr, inet, inet_saddr);
     member_read(&inet_sport, inet, inet_sport);
     
-    addr_port a_p; a_p.addr_port[0] = inet_saddr; a_p.addr_port[1] = inet_sport;
+    sock_peer peer = {}; peer.addr = inet_saddr; peer.port = inet_sport;
 
-    if(!conn_nat_map.lookup(&a_p)) {
+    if(!conn_nat_out_map.lookup(&peer)) {
         return 0;
     }
 
