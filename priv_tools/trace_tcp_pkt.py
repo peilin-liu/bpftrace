@@ -9,6 +9,8 @@ import ctypes as ct
 from struct import pack
 import argparse
 from datetime import datetime
+import signal
+from collections import deque
 
 IFNAMSIZ = 16  # uapi/linux/if.h
 XT_TABLE_MAXNAMELEN = 32  # uapi/linux/netfilter/x_tables.h
@@ -33,6 +35,7 @@ HOOKNAMES = [
     "POSTROUTING",
 ]
 
+log_file_o = None
 
 class Evt(object):
     ROUTE_EVT_IF_RX     = (1<<0)
@@ -98,6 +101,24 @@ class PkgEvt(ct.Structure):
         ("comm_name",   ct.c_char * 64),
     ]
 
+class EvtCacheLru(object):
+    def __init__(self, max_size):
+        self.max_size = max_size if max_size else 100
+        self.queue = deque([])
+
+    def push(self, evt):
+        if len(self.queue) > self.max_size:
+            self.queue.popleft()
+        self.queue.append(evt)
+
+    def traverse(self, vistor):
+        for evt in self.queue:
+           vistor(evt)
+
+    def clean(self):
+        self.queue.clear()
+
+evt_lru = None
 
 def _get(lst, index, default):
     '''
@@ -106,6 +127,15 @@ def _get(lst, index, default):
     if index < len(lst):
         return lst[index]
     return default
+
+def write_info(info):
+    if log_file_o:
+        if evt_lru:
+            evt_lru.push('%s\n' % info)
+        else:
+            log_file_o.write('%s\n' % info)
+    else:
+        print(info)
 
 fin = 1<<8
 syn = 1<<9
@@ -118,26 +148,33 @@ def format_tcp_flags(flags):
     return '|'.join(flag_list)
 
 
-
 def event_error_handler(event, formatted_datetime):
     if not event.event_flags & (Evt.ROUTE_EVT_CONNECT|Evt.ROUTE_EVT_READ|Evt.ROUTE_EVT_WRITE):
         return False
+    
+    if 115 == event.data_union.data[0]:
+        return True # skip this error
     
     event_flags = event.event_flags
     event_flags = event_flags & ~Evt.ROUTE_D_OUT
 
     daddr = inet_ntop(AF_INET, pack("=I", event.daddr))
     data_len = "%s:%s" % (event.ip_payload_len, event.tcp_payload_len)
+    local_info = ntohs(event.sport) if event.sport else 'localip'
     info = "ret:%-4d, time %.1f" % (event.data_union.data[0], event.data_union.data[1]/1000)
     if event_flags & Evt.ROUTE_EVT_CONNECT:
-        flow = "%s:%s -> %s:%s" % ('localip', 'connect', daddr, ntohs(event.dport))
+        flow = "%s:%s -> %s:%s" % (local_info, 'connect', daddr, ntohs(event.dport))
     elif event_flags & Evt.ROUTE_EVT_READ:
-        flow = "%s:%s -> %s:%s" % ('localip', 'read', daddr, ntohs(event.dport))
+        flow = "%s:%s -> %s:%s" % (local_info, 'read', daddr, ntohs(event.dport))
     elif event_flags & Evt.ROUTE_EVT_WRITE:
-        flow = "%s:%s -> %s:%s" % ('localip', 'write', daddr, ntohs(event.dport))
+        flow = "%s:%s -> %s:%s" % (local_info, 'write', daddr, ntohs(event.dport))
         
-    print("[%-20s] %-16s %-42s %-34s %-6s %-12s %-10s %-24s" % (formatted_datetime, event.ifname, flow,
+    write_info("[%-20s] %-16s %-42s %-34s %-6s %-12s %-10s %-24s" % (formatted_datetime, event.ifname, flow,
         info, Evt.e_maps[event.event_flags], format_tcp_flags(event.tcp_flags), data_len, event.comm_name))
+    
+    if evt_lru:
+        evt_lru.traverse(lambda info: log_file_o.write(info))
+        evt_lru.clean()
     
     return True
 
@@ -172,7 +209,7 @@ def event_handler(cpu, data, size):
     flow = "%s:%s -> %s:%s" % (saddr, ntohs(event.sport), daddr, ntohs(event.dport))
 
     # Optionally decode iptables events
-    iptables = ""
+    iptables = "" 
     unknow = "~UNK~"
     if event_flags & Evt.ROUTE_EVT_IPTABLE or \
             event_flags & Evt.ROUTE_EVT_NAT_IN or \
@@ -186,7 +223,7 @@ def event_handler(cpu, data, size):
         iptables = "                                  "
     data_len = "%s:%s" % (event.ip_payload_len, event.tcp_payload_len)
     # Print event
-    print("[%-20s] %-16s %-42s %-34s %-6s %-12s %-10s %-24s" % (formatted_datetime, event.ifname, flow, \
+    write_info("[%-20s] %-16s %-42s %-34s %-6s %-12s %-10s %-24s" % (formatted_datetime, event.ifname, flow, \
         iptables, Evt.e_maps[event_flags], format_tcp_flags(event.tcp_flags), data_len, event.comm_name))
 
 def attch_all_probe(enable_ipv6=False):
@@ -214,7 +251,7 @@ def attch_all_probe(enable_ipv6=False):
     b.attach_kprobe(event='tcp_connect', fn_name='kp_tcp_connect')
     b.attach_kretprobe(event='tcp_connect', fn_name='kp_tcp_connect')
 
-    b.attach_kprobe(event='inet_csk_accept', fn_name='kp_inet_csk_accept')
+    #b.attach_kprobe(event='inet_csk_accept', fn_name='kp_inet_csk_accept')
     b.attach_kretprobe(event='inet_csk_accept', fn_name='kretp_inet_csk_accept')
 
     #b.attach_kprobe(event='tcp_retransmit_skb', fn_name='kp_tcp_retransmit_skb')
@@ -236,7 +273,9 @@ if __name__ == "__main__":
     parser.add_argument('--host', dest='host', type=str, required=False, default='')
     parser.add_argument('--port', dest='port', type=int, required=False, default=-1)
     parser.add_argument('--probe_ipv6', dest='probe_ipv6', type=int, required=False, default=0)
+    parser.add_argument('--only_err', dest='only_err', type=int, required=False, default=0)
     parser.add_argument('--debug', dest='debug', type=int, required=False, default=0)
+    parser.add_argument('--w', dest='w', type=str, required=False, default=None)
 
     args = parser.parse_args()
 
@@ -316,11 +355,27 @@ if __name__ == "__main__":
     attch_all_probe(args.probe_ipv6 == "enable")
     b["route_evt"].open_perf_buffer(event_handler)
 
-    print("%-23s %-16s %-42s %-34s %-6s %-10s %-10s %-13s" % ('TIMESTAMP', 'INTERFACE', 'ADDRESSES', 'IPTABLES', 'EVENT', 'TCP_FLAGS', 'SIZE(IP:TCP)', 'COMMON_NAME'))
+    if args.w:
+        log_file_o = open(args.w, 'a+')
+
+    if args.only_err:
+        evt_lru = EvtCacheLru(10240)
+
+    write_info("%-23s %-16s %-42s %-34s %-6s %-10s %-10s %-13s" % ('TIMESTAMP', 'INTERFACE', 'ADDRESSES', 'IPTABLES', 'EVENT', 'TCP_FLAGS', 'SIZE(IP:TCP)', 'COMMON_NAME'))
+
+    def signal_handler(signum, frame):
+        b.cleanup()
+        if log_file_o:
+            log_file_o.flush()
+        os._exit(0)
+    
+    signal.signal(signal.SIGTERM, signal_handler)
 
     while 1:
         try:
             b.perf_buffer_poll(10)
         except KeyboardInterrupt:
             b.cleanup()
+            if log_file_o:
+                log_file_o.flush()
             os._exit(0)
