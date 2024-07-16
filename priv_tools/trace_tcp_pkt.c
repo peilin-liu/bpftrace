@@ -23,6 +23,7 @@
 #define ROUTE_EVT_READ      (1<<9)
 #define ROUTE_EVT_WRITE     (1<<10)
 #define ROUTE_EVT_FORWARD   (1<<11)
+#define ROUTE_EVT_POLL      (1<<12)
 
 #define ROUTE_D_OUT   (1<<23)
 
@@ -34,6 +35,9 @@
 #define CONN_OUT (1<<0)
 #define CONN_SUCCESS (1<<1)
 
+
+#define UNEXPECT_CLOSE 10001
+#define POLL_TIMEOUT  10002
 // Event structure
 struct route_evt_t {
     /* Content event_flags */
@@ -117,6 +121,7 @@ BPF_HASH(conn_nat_map, sock_peer, sock_peer);
 BPF_HASH(conn_conn_args_map, u64, struct conn_status_args);
 BPF_HASH(conn_rw_map, u64, struct conn_status_args);
 BPF_HASH(conn_active_map, u64, struct conn_active_status);
+BPF_HASH(conn_poll_map, u64, struct conn_active_status);
 
 BPF_CGROUP_ARRAY_DEF
 
@@ -457,7 +462,7 @@ static inline int do_trace_state(void *ctx, struct sock *sk, int protocol, int o
             .dport = dport
         };
         bpf_get_current_comm(evt.comm_name, sizeof(evt.comm_name));
-        evt.data[0] =  10001;
+        evt.data[0] =  UNEXPECT_CLOSE;
         evt.data[1] = (bpf_ktime_get_ns()/1000 - conn_flags->start) / 1000;
         route_evt.perf_submit(ctx, &evt, sizeof(evt));
         bpf_trace_printk("on connect error, ret %d, speedtime %d\n", evt.data[0], evt.data[1]); 
@@ -505,6 +510,7 @@ int tp_tcp_tcp_destroy_sock(struct tracepoint__tcp__tcp_destroy_sock *args){
         clean_tcp_conn_trace(sock_comm.skc_daddr, sock_comm.skc_dport);
         conn_active_map.delete((u64*)&sk);
     }
+    conn_poll_map.delete((u64*)&sk);
 
     return 0;
 }
@@ -981,5 +987,85 @@ int kp_tcp_retransmit_skb(struct pt_regs *ctx, struct sock *sk, struct sk_buff *
 }
 
 int kretp_tcp_retransmit_skb(struct pt_regs *ctx) {
+    return 0;
+}
+
+int kp_tcp_poll(struct pt_regs *ctx, struct file *file, struct socket *sock, poll_table *wait){
+    struct sock *sk = sock->sk;
+    member_read(&sk, sock, sk);
+
+    if(!conn_active_map.lookup((u64*)&sk)){
+        return 0;
+    }
+
+    u64 pid_tgid = bpf_get_current_pid_tgid();
+    u32 k_pid = pid_tgid & 0xFFFFFFFF;
+    u32 pid = pid_tgid >> 32;
+    
+    struct conn_status_args status = {};
+    status.sk = sk;
+    bpf_trace_printk("on tcp_poll, sock %u:%d\n", status.addr, status.port);
+    
+    conn_rw_map.update(&pid_tgid, &status);
+    struct conn_active_status* active_poll_s = (struct conn_active_status*)conn_poll_map.lookup((u64*)&sk);
+    if(!active_poll_s || active_poll_s->start == 0){
+        struct conn_active_status new = {};
+        new.start = bpf_ktime_get_ns()/1000; new.flags = 0;
+        conn_poll_map.update((u64*)&sk, &new);
+    }
+
+    return 0;
+}
+
+int kretp_tcp_poll(struct pt_regs *ctx){
+    u64 pid_tgid = bpf_get_current_pid_tgid();
+    u32 k_pid = pid_tgid & 0xFFFFFFFF;
+    u32 pid = pid_tgid >> 32;
+
+    struct conn_status_args* status = (struct conn_status_args*)conn_rw_map.lookup(&pid_tgid);
+    if(!status) { return 0;}
+    conn_rw_map.delete(&pid_tgid);
+
+    __poll_t mask = PT_REGS_RC(ctx);
+    __u64 now = bpf_ktime_get_ns()/1000;
+    struct sock *sk = status->sk;
+    struct conn_active_status* active_poll_s = (struct conn_active_status*)conn_poll_map.lookup((u64*)&sk);
+    if(!active_poll_s){
+        return 0;
+    }
+    if(mask & EPOLLIN) {
+        active_poll_s->start = now;
+        return 0; 
+    }
+
+    if(now - active_poll_s->start < 500000){
+        bpf_trace_printk("on tcp_poll skip, timegap %lu, sock %u:%d\n", now - active_poll_s->start, status->addr, status->port);
+        return 0;
+    }
+
+    struct route_evt_t evt = {
+        .event_flags = ROUTE_EVT_POLL,
+        .pid  = pid,
+        .tgid  = k_pid,
+        .ip_version = 4,
+    };
+
+    bpf_trace_printk("on tcp_poll timeout %lu, sock %u:%d\n", now - active_poll_s->start, status->addr, status->port);
+    bpf_get_current_comm(evt.comm_name, sizeof(evt.comm_name));
+
+    struct sock_common sock_comm;
+    member_read(&sock_comm, sk, __sk_common);
+    evt.daddr = sock_comm.skc_daddr;
+    evt.dport = sock_comm.skc_dport;
+
+    struct inet_sock *inet = inet_sk(sk);
+    member_read(&evt.saddr, inet, inet_saddr);
+    member_read(&evt.sport, inet, inet_sport);
+
+    evt.data[0] =  POLL_TIMEOUT;
+    evt.data[1] = (now - active_poll_s->start) / 1000;
+    active_poll_s->start = now;
+    route_evt.perf_submit(ctx, &evt, sizeof(evt));
+
     return 0;
 }

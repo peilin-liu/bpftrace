@@ -50,6 +50,8 @@ class Evt(object):
     ROUTE_EVT_ACCEPT = 1 << 8
     ROUTE_EVT_READ = 1 << 9
     ROUTE_EVT_WRITE = 1 << 10
+    ROUTE_EVT_FORWARD  = 1 << 11
+    ROUTE_EVT_POLL = 1 << 12
 
     ROUTE_D_OUT = 1 << 23
 
@@ -65,6 +67,8 @@ class Evt(object):
         ROUTE_EVT_ACCEPT: "ACCEPT",
         ROUTE_EVT_READ: "U_R",
         ROUTE_EVT_WRITE: "U_W",
+        ROUTE_EVT_FORWARD: 'FORWARD',
+        ROUTE_EVT_POLL: 'POLL_E'
     }
 
 
@@ -156,7 +160,7 @@ def format_tcp_flags(flags):
 
 def event_error_handler(event, formatted_datetime):
     if not event.event_flags & (
-        Evt.ROUTE_EVT_CONNECT | Evt.ROUTE_EVT_READ | Evt.ROUTE_EVT_WRITE
+        Evt.ROUTE_EVT_CONNECT | Evt.ROUTE_EVT_READ | Evt.ROUTE_EVT_WRITE | Evt.ROUTE_EVT_POLL
     ):
         return False
 
@@ -168,17 +172,14 @@ def event_error_handler(event, formatted_datetime):
 
     daddr = inet_ntop(AF_INET, pack("=I", event.daddr))
     data_len = "%s:%s" % (event.ip_payload_len, event.tcp_payload_len)
-    local_info = ntohs(event.sport) if event.sport else "localip"
+    laddr_info = inet_ntop(AF_INET, pack("=I", event.saddr)) if event.saddr else "laddr"
+    lport_info = ntohs(event.sport) if event.sport else "lport"
+    
     info = "ret:%-4d, time %.1f" % (
         event.data_union.data[0],
         event.data_union.data[1] / 1000,
     )
-    if event_flags & Evt.ROUTE_EVT_CONNECT:
-        flow = "%s:%s -> %s:%s" % (local_info, "connect", daddr, ntohs(event.dport))
-    elif event_flags & Evt.ROUTE_EVT_READ:
-        flow = "%s:%s -> %s:%s" % (local_info, "read", daddr, ntohs(event.dport))
-    elif event_flags & Evt.ROUTE_EVT_WRITE:
-        flow = "%s:%s -> %s:%s" % (local_info, "write", daddr, ntohs(event.dport))
+    flow = "%s:%s -> %s:%s" % (laddr_info, lport_info, daddr, ntohs(event.dport))
 
     write_info(
         "[%-20s] %-16s %-42s %-34s %-6s %-12s %-10s %-24s"
@@ -284,13 +285,15 @@ def attch_all_probe(enable_ipv6=False):
     b.attach_kretprobe(event="__sys_connect", fn_name="kretp___sys_connect")
 
     b.attach_kprobe(event="tcp_connect", fn_name="kp_tcp_connect")
-    b.attach_kretprobe(event="tcp_connect", fn_name="kp_tcp_connect")
+    b.attach_kretprobe(event="tcp_connect", fn_name="kretp_tcp_poll")
 
     # b.attach_kprobe(event='inet_csk_accept', fn_name='kp_inet_csk_accept')
     b.attach_kretprobe(event="inet_csk_accept", fn_name="kretp_inet_csk_accept")
 
     # b.attach_kprobe(event='tcp_retransmit_skb', fn_name='kp_tcp_retransmit_skb')
     # b.attach_kretprobe(event='tcp_retransmit_skb', fn_name='kretp_tcp_retransmit_skb')
+    b.attach_kprobe(event='tcp_poll', fn_name='kp_tcp_poll')
+    b.attach_kretprobe(event='tcp_poll', fn_name='kretp_tcp_poll')
 
     b.attach_tracepoint(tp="net:netif_rx", fn_name="tp_net_netif_rx")
     b.attach_tracepoint(tp="net:net_dev_queue", fn_name="tp_net_net_dev_queue")
