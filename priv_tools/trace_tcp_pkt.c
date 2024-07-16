@@ -457,7 +457,7 @@ static inline int do_trace_state(void *ctx, struct sock *sk, int protocol, int o
             .dport = dport
         };
         bpf_get_current_comm(evt.comm_name, sizeof(evt.comm_name));
-        evt.data[0] =  11111;
+        evt.data[0] =  10001;
         evt.data[1] = (bpf_ktime_get_ns()/1000 - conn_flags->start) / 1000;
         route_evt.perf_submit(ctx, &evt, sizeof(evt));
         bpf_trace_printk("on connect error, ret %d, speedtime %d\n", evt.data[0], evt.data[1]); 
