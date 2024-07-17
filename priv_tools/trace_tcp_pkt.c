@@ -115,13 +115,17 @@ struct conn_active_status{
     __u8  flags:8;
 };
 
+struct conn_poll_status{
+    __u64 start; 
+};
+
 BPF_HASH(cur_ipt_do_table_args, u64, struct ipt_do_table_args);
 BPF_HASH(cur_ipt_do_nat_args, u64, struct ipt_do_nat_args);
 BPF_HASH(conn_nat_map, sock_peer, sock_peer);
 BPF_HASH(conn_conn_args_map, u64, struct conn_status_args);
 BPF_HASH(conn_rw_map, u64, struct conn_status_args);
 BPF_HASH(conn_active_map, u64, struct conn_active_status);
-BPF_HASH(conn_poll_map, u64, struct conn_active_status);
+BPF_HASH(conn_poll_map, u64, struct conn_poll_status);
 
 BPF_CGROUP_ARRAY_DEF
 
@@ -1012,17 +1016,12 @@ int kp_tcp_poll(struct pt_regs *ctx, struct file *file, struct socket *sock, pol
     status.sk = sk;
     
     conn_rw_map.update(&pid_tgid, &status);
-    struct conn_active_status* active_poll_s = (struct conn_active_status*)conn_poll_map.lookup((u64*)&sk);
-    if(!active_poll_s || active_poll_s->flags == 1){
-        u64 now = bpf_ktime_get_ns()/1000;
-        if(!active_poll_s){
-            struct conn_active_status new = {};
-            new.start = now; new.flags = 0;
-            conn_poll_map.update((u64*)&sk, &new);
-        }else{
-            active_poll_s->start = now; active_poll_s->flags = 0;
-        }
-
+    struct conn_poll_status zero = {};
+    struct conn_poll_status* active_poll_s = 
+        (struct conn_poll_status*)conn_poll_map.lookup_or_try_init((u64*)&sk, &zero);
+    
+    if(active_poll_s && 0 == active_poll_s->start){
+        active_poll_s->start = bpf_ktime_get_ns()/1000;
         bpf_trace_printk("on tcp_poll sock %p, %u:%d insert\n", sk, status.addr, status.port);
     }
 
@@ -1039,22 +1038,26 @@ int kretp_tcp_poll(struct pt_regs *ctx){
     conn_rw_map.delete(&pid_tgid);
 
     struct sock *sk = status->sk;
-    struct conn_active_status* active_poll_s = (struct conn_active_status*)conn_poll_map.lookup((u64*)&sk);
+    struct conn_poll_status* active_poll_s = (struct conn_poll_status*)conn_poll_map.lookup((u64*)&sk);
     if(!active_poll_s){
         return 0;
     }
 
     __poll_t mask = PT_REGS_RC(ctx);
     __u64 now = bpf_ktime_get_ns()/1000;
+    __u64 start = active_poll_s->start;
+
     if(mask & EPOLLIN) {
         active_poll_s->start = now;
         return 0; 
     }
-
-    if(now - active_poll_s->start < 500000){
+    u64 gap = now - start;
+    if(gap < 500000){
         bpf_trace_printk("on tcp_poll sock %p, %u:%d skip\n", sk, status->addr, status->port);
         return 0;
     }
+
+    active_poll_s->start = now;
 
     struct route_evt_t evt = {
         .event_flags = ROUTE_EVT_POLL,
@@ -1075,9 +1078,7 @@ int kretp_tcp_poll(struct pt_regs *ctx){
     member_read(&evt.sport, inet, inet_sport);
 
     evt.data[0] =  POLL_TIMEOUT;
-    evt.data[1] = (now - active_poll_s->start) / 1000;
-    active_poll_s->start = now;
-    active_poll_s->flags = 1;
+    evt.data[1] = gap / 1000;
     route_evt.perf_submit(ctx, &evt, sizeof(evt));
 
     return 0;
