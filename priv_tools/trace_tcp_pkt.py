@@ -177,7 +177,7 @@ def event_error_handler(event, formatted_datetime):
     
     info = "ret:%-4d, time %.1f" % (
         event.data_union.data[0],
-        event.data_union.data[1] / 1000,
+        event.data_union.data[1] / 1000.0
     )
     flow = "%s:%s -> %s:%s" % (laddr_info, lport_info, daddr, ntohs(event.dport))
 
@@ -320,7 +320,7 @@ if __name__ == "__main__":
     )  # 这个特性,4.9上的支持不好
     parser.add_argument("--pid", dest="pid", type=int, required=False, default=-1)
     parser.add_argument("--host", dest="host", type=str, required=False, default="")
-    parser.add_argument("--port", dest="port", type=int, required=False, default=-1)
+    parser.add_argument("--port", dest="port", type=str, required=False, default="")
     parser.add_argument(
         "--probe_ipv6", dest="probe_ipv6", type=int, required=False, default=0
     )
@@ -372,11 +372,21 @@ if __name__ == "__main__":
         host_filter = """%d""" % (htonl(args.host))
     bpf_filters.update({"HOST_FILTER": host_filter})
 
-    if args.port <= 0:
-        port_filter = """0"""
-    else:
-        port_filter = """%d""" % (htons(args.port))
-    bpf_filters.update({"PORT_FILTER": port_filter})
+    ports = [p for p in args.port.split(',') if p]
+    if len(ports) <= 0:
+        ports.append('0')
+
+    if len(ports) > 3:
+        print('port max size: 3')
+        exit(-1)
+
+    port_seq = 1
+    for port in ports:
+        print('do port %s in %s' % (port, ports))
+        port_filter = """%d""" % (htons(int(port, 10)))
+        bpf_filters.update({"PORT_FILTER{seq}".format(seq=port_seq): port_filter})
+        port_seq += 1
+    bpf_filters.update({"PORT_CHECK_FILTER": "PORT_CHECK{size}".format(size=len(ports))})
 
     bpf_text = ""
     command_path = "./trace_tcp_pkt.c"
@@ -407,7 +417,6 @@ if __name__ == "__main__":
         cflags.append("-DDEBUGLOG")
     # Build probe and open event buffer
     b = BPF(text=bpf_text, cflags=cflags, debug=0)
-
     if args.cgroup_path:
         cgroup_array = b.get_table(cgroup_map_name)
         cgroup_array[0] = args.cgroup_path
