@@ -284,14 +284,11 @@ def attch_all_probe(enable_ipv6=False):
     # b.attach_kprobe(event='__sys_connect', fn_name='kp___sys_connect')
     b.attach_kretprobe(event="__sys_connect", fn_name="kretp___sys_connect")
 
-    b.attach_kprobe(event="tcp_connect", fn_name="kp_tcp_connect")
-    b.attach_kretprobe(event="tcp_connect", fn_name="kretp_tcp_poll")
-
     # b.attach_kprobe(event='inet_csk_accept', fn_name='kp_inet_csk_accept')
     b.attach_kretprobe(event="inet_csk_accept", fn_name="kretp_inet_csk_accept")
 
-    # b.attach_kprobe(event='tcp_retransmit_skb', fn_name='kp_tcp_retransmit_skb')
-    # b.attach_kretprobe(event='tcp_retransmit_skb', fn_name='kretp_tcp_retransmit_skb')
+    b.attach_kprobe(event="tcp_sendmsg", fn_name="kp_tcp_sendmsg")
+    
     b.attach_kprobe(event='tcp_poll', fn_name='kp_tcp_poll')
     b.attach_kretprobe(event='tcp_poll', fn_name='kretp_tcp_poll')
 
@@ -307,6 +304,7 @@ def attch_all_probe(enable_ipv6=False):
         tp="sock:inet_sock_set_state", fn_name="tp_sock_inet_sock_set_state"
     )
     b.attach_tracepoint(tp="tcp:tcp_destroy_sock", fn_name="tp_tcp_tcp_destroy_sock")
+    b.attach_tracepoint(tp="tcp:tcp_retransmit_skb", fn_name="tp_tcp_tcp_retransmit_skb")
 
 
 if __name__ == "__main__":
@@ -382,7 +380,6 @@ if __name__ == "__main__":
 
     port_seq = 1
     for port in ports:
-        print('do port %s in %s' % (port, ports))
         port_filter = """%d""" % (htons(int(port, 10)))
         bpf_filters.update({"PORT_FILTER{seq}".format(seq=port_seq): port_filter})
         port_seq += 1
@@ -406,6 +403,7 @@ if __name__ == "__main__":
         "-Wno-tautological-compare",
         "-Wno-implicit-function-declaration",
         "-DCONFIG_NET_NS",
+        "-DKBUILD_MODNAME=\"igor-tcp-tracer\""
     ]
     if args.probe_ipv6 == "enable":
         print("enable ipv6: %s" % args.probe_ipv6)

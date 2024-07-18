@@ -4,6 +4,7 @@
 #include <uapi/linux/tcp.h>
 #include <net/inet_sock.h>
 #include <net/sock.h>
+#include <net/tcp.h>
 #include <linux/netfilter/x_tables.h>
 #include <bcc/proto.h>
 
@@ -31,13 +32,15 @@
 #define FALSE 0
 
 //for conn flags
-#define CONN_IN 0
-#define CONN_OUT (1<<0)
-#define CONN_SUCCESS (1<<1)
+#define CONN_ACTIVE_IN      0
+#define CONN_ACTIVE_OUT     (1<<0)
+#define CONN_ACTIVE_SUCCESS (1<<1)
+#define CONN_ACTIVE_RUN     (1<<2)
 
 
 #define UNEXPECT_CLOSE 10001
 #define POLL_TIMEOUT  10002
+#define RET_TIMEOUT  10003
 // Event structure
 struct route_evt_t {
     /* Content event_flags */
@@ -111,10 +114,14 @@ struct conn_status_args
 };
 
 struct conn_active_status{
-    __u64 conn_start:56; 
+    __u64 conn_start:56; //us
     __u8  flags:8;
-    __u64 r_start:56;
-    __u8  res:8;
+    __u64 r_start:56;   //us
+    __u8  res1:8;
+    __u64 ret_start:56; //us
+    __u8  res2:8;
+    __u64 evt_time;  //us
+    __u32 ret_seq;
 };
 
 BPF_HASH(cur_ipt_do_table_args, u64, struct ipt_do_table_args);
@@ -437,7 +444,7 @@ static inline int do_trace_state(void *ctx, struct sock *sk, int protocol, int o
     if( newstate == TCP_ESTABLISHED){
         struct conn_active_status * conn_active_s = (struct conn_active_status*)conn_active_map.lookup((u64*)&sk);
         if(conn_active_s){
-            conn_active_s->flags |= CONN_SUCCESS;
+            conn_active_s->flags |= CONN_ACTIVE_SUCCESS;
         }
     }
 
@@ -450,7 +457,7 @@ static inline int do_trace_state(void *ctx, struct sock *sk, int protocol, int o
 
     
     struct conn_active_status * conn_active_s = (struct conn_active_status*)conn_active_map.lookup((u64*)&sk);
-    if (conn_active_s && 0 == (conn_active_s->flags & CONN_SUCCESS) && conn_active_s->flags & CONN_OUT) {
+    if (conn_active_s && 0 == (conn_active_s->flags & CONN_ACTIVE_SUCCESS) && conn_active_s->flags & CONN_ACTIVE_OUT) {
         u64 pid_tgid = bpf_get_current_pid_tgid();
         u32 k_pid = pid_tgid & 0xFFFFFFFF;
         u32 pid = pid_tgid >> 32; 
@@ -516,6 +523,50 @@ int tp_tcp_tcp_destroy_sock(struct tracepoint__tcp__tcp_destroy_sock *args){
 
     return 0;
 }
+
+int tp_tcp_tcp_retransmit_skb(struct tracepoint__tcp__tcp_retransmit_skb *args){
+    const struct sock *sk = (const struct sock *)args->skaddr;
+    const struct sk_buff *skb = (const struct sk_buff *)args->skbaddr;
+
+    if(!skb || TCP_ESTABLISHED != sk->__sk_common.skc_state ||
+         AF_INET != sk->__sk_common.skc_family){
+        return 0;
+    }
+    struct conn_active_status* conn_active_s = (struct conn_active_status*)conn_active_map.lookup((u64*)&sk);
+    if(!conn_active_s){ 
+        return 0;
+    }
+
+    struct tcp_skb_cb* tcb = ((struct tcp_skb_cb *)&((skb)->cb[0]));
+    __u64 now = bpf_ktime_get_ns()/1000;
+    if(0 == conn_active_s->ret_start || tcb->seq > conn_active_s->ret_seq){
+        conn_active_s->ret_start = now;
+        conn_active_s->evt_time = now;
+        conn_active_s->ret_seq = tcb->seq;
+    }else if(now - conn_active_s->evt_time > 1900000){
+        conn_active_s->evt_time = now;
+        u64 pid_tgid = bpf_get_current_pid_tgid();
+        u32 k_pid = pid_tgid & 0xFFFFFFFF;
+        u32 pid = pid_tgid >> 32; 
+        struct route_evt_t evt = {
+            .event_flags = ROUTE_EVT_READ,
+            .pid  = pid,
+            .tgid  = k_pid,
+            .ip_version = 4,
+            .saddr = *(__u32*)args->saddr,
+            .sport = bpf_htons(args->sport),
+            .daddr = *(__u32*)args->daddr,
+            .dport = bpf_htons(args->dport)
+        };
+        bpf_get_current_comm(evt.comm_name, sizeof(evt.comm_name));
+        evt.data[0] =  RET_TIMEOUT;
+        evt.data[1] = (now - conn_active_s->ret_start) / 1000;
+        route_evt.perf_submit((void*)args, &evt, sizeof(evt));
+    }
+
+    return 0;
+}
+
 /**
  * Common iptables functions
  */
@@ -838,7 +889,7 @@ int kp_tcp_connect(struct pt_regs *ctx, struct sock *sk) {
         conn_conn_args_map.update(&pid_tgid, &status);
 
         struct conn_active_status conn_active_s = {};
-        conn_active_s.flags = CONN_OUT;
+        conn_active_s.flags |= CONN_ACTIVE_OUT;
         conn_active_s.conn_start = status.start/1000;
         conn_active_map.update((u64*)&sk, &conn_active_s);
 
@@ -913,7 +964,7 @@ int kretp_inet_csk_accept(struct pt_regs *ctx){
     member_read(&sock_comm, newsk, __sk_common);
 
     struct conn_active_status conn_active_s = {};
-    conn_active_s.flags = CONN_IN;
+    conn_active_s.flags |= CONN_ACTIVE_IN;
     conn_active_s.conn_start = bpf_ktime_get_ns()/1000;
     conn_active_map.update((u64*)&newsk, &conn_active_s);
 
@@ -989,11 +1040,15 @@ int kretp_tcp_recvmsg(struct pt_regs *ctx) {
     return 0;
 }
 
-int kp_tcp_retransmit_skb(struct pt_regs *ctx, struct sock *sk, struct sk_buff *skb, int segs) {
-    return 0;
-}
+int kp_tcp_sendmsg(struct pt_regs *ctx, struct sock *sk, struct msghdr *msg, size_t size){
+    struct conn_active_status* conn_active_s = 
+        (struct conn_active_status*)conn_active_map.lookup((u64*)&sk);
+    if(!conn_active_s){
+        return 0;
+    }
 
-int kretp_tcp_retransmit_skb(struct pt_regs *ctx) {
+    conn_active_s->flags |= CONN_ACTIVE_RUN;
+
     return 0;
 }
 
@@ -1005,7 +1060,7 @@ int kp_tcp_poll(struct pt_regs *ctx, struct file *file, struct socket *sock, pol
     struct sock *sk = sock->sk;
     struct conn_active_status* conn_active_s = 
         (struct conn_active_status*)conn_active_map.lookup((u64*)&sk);
-    if(!conn_active_s){
+    if(!conn_active_s || 0==(conn_active_s->flags&CONN_ACTIVE_RUN)){
         return 0;
     }
 
