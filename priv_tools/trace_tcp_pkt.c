@@ -41,6 +41,16 @@
 #define UNEXPECT_CLOSE 10001
 #define POLL_TIMEOUT  10002
 #define RET_TIMEOUT  10003
+
+
+struct fake_tcphdr {
+	__be16	source;
+	__be16	dest;
+	__be32	seq;
+	__be32	ack_seq;
+	__u16	flags;
+}__attribute__((packed));
+
 // Event structure
 struct route_evt_t {
     /* Content event_flags */
@@ -54,8 +64,10 @@ struct route_evt_t {
     /* Packet type (IPv4 or IPv6) and address */
     __be64 saddr;
     __be64 daddr;
-	u16	sport;
+	u16	sport; //千万不要调整接下来这五个成员(fake_tcphdr)。为了提升性能，这里是和内核结构紧密耦合的。
 	u16	dport;
+    u32 sk_seq;
+    u32 ack_seq;
     u16 tcp_flags;
     u16 ip_payload_len;
     u16 tcp_payload_len;
@@ -285,9 +297,7 @@ static inline int parse_skb_tcp_info(struct route_evt_t *evt, void *ctx, struct 
     }
     
     // Load TCP packets info
-    member_read(&evt->sport, tcp_header, source);
-    member_read(&evt->dport, tcp_header, dest);
-    bpf_probe_read(&evt->tcp_flags, 2, (char*)tcp_header + 12);
+    bpf_probe_read(&evt->sport, sizeof(struct fake_tcphdr), tcp_header);
     evt->tcp_payload_len = evt->ip_payload_len - ((evt->tcp_flags&0x00F0) >> 2);
 
     // Get device pointer, we'll need it to get the name and network namespace

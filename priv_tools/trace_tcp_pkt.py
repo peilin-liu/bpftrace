@@ -3,7 +3,7 @@
 
 import os
 import sys
-from socket import htons, ntohs, htonl, inet_ntop, inet_pton, AF_INET, AF_INET6
+from socket import htons, ntohs, htonl, ntohl, inet_ntop, inet_pton, AF_INET, AF_INET6
 from bcc import BPF
 import ctypes as ct
 from struct import pack
@@ -93,6 +93,8 @@ class PkgEvt(ct.Structure):
         ("daddr", ct.c_ulonglong),
         ("sport", ct.c_ushort),
         ("dport", ct.c_ushort),
+        ("sk_seq", ct.c_uint32),
+        ("ack_seq", ct.c_uint32),
         ("tcp_flags", ct.c_ushort),
         ("ip_payload_len", ct.c_ushort),
         ("tcp_payload_len", ct.c_ushort),
@@ -180,9 +182,9 @@ def event_error_handler(event, formatted_datetime):
         event.data_union.data[1] / 1000.0
     )
     flow = "%s:%s -> %s:%s" % (laddr_info, lport_info, daddr, ntohs(event.dport))
-
+    seq_info = "%s|%s" % (ntohl(event.sk_seq), ntohl(event.ack_seq))
     write_info(
-        "[%-20s] %-16s %-42s %-34s %-6s %-12s %-10s %-24s"
+        "[%-20s] %-16s %-42s %-34s %-6s %-12s %-18s %-10s %-24s"
         % (
             formatted_datetime,
             event.ifname if len(event.ifname) > 0 else "None",
@@ -190,6 +192,7 @@ def event_error_handler(event, formatted_datetime):
             info,
             Evt.e_maps[event.event_flags],
             format_tcp_flags(event.tcp_flags),
+            seq_info,
             data_len,
             event.comm_name if len(event.comm_name) > 0 else "None",
         )
@@ -246,9 +249,10 @@ def event_handler(cpu, data, size):
     else:
         iptables = "None                              "
     data_len = "%s:%s" % (event.ip_payload_len, event.tcp_payload_len)
+    seq_info = "%s|%s" % (ntohl(event.sk_seq), ntohl(event.ack_seq))
     # Print event
     write_info(
-        "[%-20s] %-16s %-42s %-34s %-6s %-12s %-10s %-24s"
+        "[%-20s] %-16s %-42s %-34s %-6s %-12s %-18s %-10s %-24s"
         % (
             formatted_datetime,
             event.ifname if len(event.ifname) > 0 else "None",
@@ -256,17 +260,19 @@ def event_handler(cpu, data, size):
             iptables,
             Evt.e_maps[event_flags],
             format_tcp_flags(event.tcp_flags),
+            seq_info,
             data_len,
             event.comm_name if len(event.comm_name) > 0 else "None",
         )
     )
 
 
-def attch_all_probe(enable_ipv6=False):
-    b.attach_kprobe(event="ipt_do_table", fn_name="kp_ipt_do_table")
-    b.attach_kretprobe(event="ipt_do_table", fn_name="kretp_ipt_do_table")
+def attch_all_probe(enable_ipv6=False, enable_do_ipt=False):
+    if enable_do_ipt:
+        b.attach_kprobe(event="ipt_do_table", fn_name="kp_ipt_do_table")
+        b.attach_kretprobe(event="ipt_do_table", fn_name="kretp_ipt_do_table")
 
-    if enable_ipv6:
+    if enable_ipv6 and enable_do_ipt:
         b.attach_kprobe(event="ip6t_do_table", fn_name="kp_ip6t_do_table")
         b.attach_kretprobe(event="ip6t_do_table", fn_name="kretp_ip6t_do_table")
 
@@ -321,6 +327,9 @@ if __name__ == "__main__":
     parser.add_argument("--port", dest="port", type=str, required=False, default="")
     parser.add_argument(
         "--probe_ipv6", dest="probe_ipv6", type=int, required=False, default=0
+    )
+    parser.add_argument(
+        "--probe_do_ipt", dest="probe_do_ipt", type=int, required=False, default=0
     )
     parser.add_argument(
         "--only_err", dest="only_err", type=int, required=False, default=0
@@ -402,7 +411,6 @@ if __name__ == "__main__":
         "-Wno-macro-redefined",
         "-Wno-tautological-compare",
         "-Wno-implicit-function-declaration",
-        "-DCONFIG_NET_NS",
         "-DKBUILD_MODNAME=\"igor-tcp-tracer\""
     ]
     if args.probe_ipv6 == "enable":
@@ -419,7 +427,7 @@ if __name__ == "__main__":
         cgroup_array = b.get_table(cgroup_map_name)
         cgroup_array[0] = args.cgroup_path
 
-    attch_all_probe(args.probe_ipv6 == "enable")
+    attch_all_probe(args.probe_ipv6!=0, args.probe_do_ipt!=0)
     b["route_evt"].open_perf_buffer(event_handler)
 
     if args.w:
@@ -429,7 +437,7 @@ if __name__ == "__main__":
         evt_lru = EvtCacheLru(10240)
 
     print(
-        "%-23s %-16s %-42s %-34s %-6s %-10s %-10s %-13s"
+        "%-23s %-16s %-42s %-34s %-6s %-12s %-18s %-10s %-13s"
         % (
             "TIMESTAMP",
             "INTERFACE",
@@ -437,6 +445,7 @@ if __name__ == "__main__":
             "IPTABLES",
             "EVENT",
             "TCP_FLAGS",
+            "SEQ|ACK",
             "SIZE(IP:TCP)",
             "COMMON_NAME",
         )
