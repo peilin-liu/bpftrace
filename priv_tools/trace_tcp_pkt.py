@@ -50,8 +50,9 @@ class Evt(object):
     ROUTE_EVT_ACCEPT = 1 << 8
     ROUTE_EVT_READ = 1 << 9
     ROUTE_EVT_WRITE = 1 << 10
-    ROUTE_EVT_FORWARD  = 1 << 11
+    ROUTE_EVT_FORWARD = 1 << 11
     ROUTE_EVT_POLL = 1 << 12
+    ROUTE_EVT_FLUSH = 1 << 13
 
     ROUTE_D_OUT = 1 << 23
 
@@ -67,10 +68,16 @@ class Evt(object):
         ROUTE_EVT_ACCEPT: "ACCEPT",
         ROUTE_EVT_READ: "U_R",
         ROUTE_EVT_WRITE: "U_W",
-        ROUTE_EVT_FORWARD: 'FORWARD',
-        ROUTE_EVT_POLL: 'POLL_E'
+        ROUTE_EVT_FORWARD: "FORWARD",
+        ROUTE_EVT_POLL: "POLL_E",
+        ROUTE_EVT_FLUSH: "FLUSH"
     }
 
+ERROR_FLAGS = Evt.ROUTE_EVT_CONNECT \
+        | Evt.ROUTE_EVT_READ \
+        | Evt.ROUTE_EVT_WRITE \
+        | Evt.ROUTE_EVT_POLL \
+        | Evt.ROUTE_EVT_FLUSH
 
 class PkgEvtUnion(ct.Union):
     _fields_ = [
@@ -145,7 +152,10 @@ def write_info(info):
         else:
             log_file_o.write("%s\n" % info)
     else:
-        print(info)
+        if evt_lru:
+            evt_lru.push("%s" % info)
+        else:
+            print(info)
 
 
 fin = 1 << 8
@@ -161,9 +171,7 @@ def format_tcp_flags(flags):
 
 
 def event_error_handler(event, formatted_datetime):
-    if not event.event_flags & (
-        Evt.ROUTE_EVT_CONNECT | Evt.ROUTE_EVT_READ | Evt.ROUTE_EVT_WRITE | Evt.ROUTE_EVT_POLL
-    ):
+    if not event.event_flags & ERROR_FLAGS:
         return False
 
     if 115 == event.data_union.data[0]:
@@ -176,15 +184,15 @@ def event_error_handler(event, formatted_datetime):
     data_len = "%s:%s" % (event.ip_payload_len, event.tcp_payload_len)
     laddr_info = inet_ntop(AF_INET, pack("=I", event.saddr)) if event.saddr else "laddr"
     lport_info = ntohs(event.sport) if event.sport else "lport"
-    
+
     info = "ret:%-4d, time %.1f" % (
         event.data_union.data[0],
-        event.data_union.data[1] / 1000.0
+        event.data_union.data[1] / 1000.0,
     )
     flow = "%s:%s -> %s:%s" % (laddr_info, lport_info, daddr, ntohs(event.dport))
     seq_info = "%s|%s" % (ntohl(event.sk_seq), ntohl(event.ack_seq))
     write_info(
-        "[%-20s] %-16s %-42s %-34s %-6s %-12s %-18s %-10s %-24s"
+        "[%-20s] %-16s %-42s %-34s %-6s %-12s %-22s %-10s %-24s"
         % (
             formatted_datetime,
             event.ifname if len(event.ifname) > 0 else "None",
@@ -199,7 +207,10 @@ def event_error_handler(event, formatted_datetime):
     )
 
     if evt_lru:
-        evt_lru.traverse(lambda info: log_file_o.write(info))
+        if log_file_o:
+            evt_lru.traverse(lambda info: log_file_o.write(info))
+        else:
+            evt_lru.traverse(lambda info: print(info))
         evt_lru.clean()
 
     return True
@@ -238,9 +249,11 @@ def event_handler(cpu, data, size):
     # Optionally decode iptables events
     iptables = ""
     unknow = "~UNK~"
-    if event_flags & Evt.ROUTE_EVT_IPTABLE \
-            or event_flags & Evt.ROUTE_EVT_NAT_IN \
-            or event_flags & Evt.ROUTE_EVT_NAT_OUT:
+    if (
+        event_flags & Evt.ROUTE_EVT_IPTABLE
+        or event_flags & Evt.ROUTE_EVT_NAT_IN
+        or event_flags & Evt.ROUTE_EVT_NAT_OUT
+    ):
         verdict = _get(NF_VERDICT_NAME, event.verdict, unknow)
         hook = _get(HOOKNAMES, event.hook, unknow)
         if hook == unknow:
@@ -252,7 +265,7 @@ def event_handler(cpu, data, size):
     seq_info = "%s|%s" % (ntohl(event.sk_seq), ntohl(event.ack_seq))
     # Print event
     write_info(
-        "[%-20s] %-16s %-42s %-34s %-6s %-12s %-18s %-10s %-24s"
+        "[%-20s] %-16s %-42s %-34s %-6s %-12s %-22s %-10s %-24s"
         % (
             formatted_datetime,
             event.ifname if len(event.ifname) > 0 else "None",
@@ -294,9 +307,9 @@ def attch_all_probe(enable_ipv6=False, enable_do_ipt=False):
     b.attach_kretprobe(event="inet_csk_accept", fn_name="kretp_inet_csk_accept")
 
     b.attach_kprobe(event="tcp_sendmsg", fn_name="kp_tcp_sendmsg")
-    
-    b.attach_kprobe(event='tcp_poll', fn_name='kp_tcp_poll')
-    b.attach_kretprobe(event='tcp_poll', fn_name='kretp_tcp_poll')
+
+    b.attach_kprobe(event="tcp_poll", fn_name="kp_tcp_poll")
+    b.attach_kretprobe(event="tcp_poll", fn_name="kretp_tcp_poll")
 
     b.attach_tracepoint(tp="net:netif_rx", fn_name="tp_net_netif_rx")
     b.attach_tracepoint(tp="net:net_dev_queue", fn_name="tp_net_net_dev_queue")
@@ -310,7 +323,9 @@ def attch_all_probe(enable_ipv6=False, enable_do_ipt=False):
         tp="sock:inet_sock_set_state", fn_name="tp_sock_inet_sock_set_state"
     )
     b.attach_tracepoint(tp="tcp:tcp_destroy_sock", fn_name="tp_tcp_tcp_destroy_sock")
-    b.attach_tracepoint(tp="tcp:tcp_retransmit_skb", fn_name="tp_tcp_tcp_retransmit_skb")
+    b.attach_tracepoint(
+        tp="tcp:tcp_retransmit_skb", fn_name="tp_tcp_tcp_retransmit_skb"
+    )
 
 
 if __name__ == "__main__":
@@ -379,12 +394,12 @@ if __name__ == "__main__":
         host_filter = """%d""" % (htonl(args.host))
     bpf_filters.update({"HOST_FILTER": host_filter})
 
-    ports = [p for p in args.port.split(',') if p]
+    ports = [p for p in args.port.split(",") if p]
     if len(ports) <= 0:
-        ports.append('0')
+        ports.append("0")
 
     if len(ports) > 3:
-        print('port max size: 3')
+        print("port max size: 3")
         exit(-1)
 
     port_seq = 1
@@ -392,7 +407,9 @@ if __name__ == "__main__":
         port_filter = """%d""" % (htons(int(port, 10)))
         bpf_filters.update({"PORT_FILTER{seq}".format(seq=port_seq): port_filter})
         port_seq += 1
-    bpf_filters.update({"PORT_CHECK_FILTER": "PORT_CHECK{size}".format(size=len(ports))})
+    bpf_filters.update(
+        {"PORT_CHECK_FILTER": "PORT_CHECK{size}".format(size=len(ports))}
+    )
 
     bpf_text = ""
     command_path = "./trace_tcp_pkt.c"
@@ -411,7 +428,7 @@ if __name__ == "__main__":
         "-Wno-macro-redefined",
         "-Wno-tautological-compare",
         "-Wno-implicit-function-declaration",
-        "-DKBUILD_MODNAME=\"igor-tcp-tracer\""
+        '-DKBUILD_MODNAME="igor-tcp-tracer"',
     ]
     if args.probe_ipv6 == "enable":
         print("enable ipv6: %s" % args.probe_ipv6)
@@ -427,7 +444,7 @@ if __name__ == "__main__":
         cgroup_array = b.get_table(cgroup_map_name)
         cgroup_array[0] = args.cgroup_path
 
-    attch_all_probe(args.probe_ipv6!=0, args.probe_do_ipt!=0)
+    attch_all_probe(args.probe_ipv6 != 0, args.probe_do_ipt != 0)
     b["route_evt"].open_perf_buffer(event_handler)
 
     if args.w:
@@ -437,7 +454,7 @@ if __name__ == "__main__":
         evt_lru = EvtCacheLru(10240)
 
     print(
-        "%-23s %-16s %-42s %-34s %-6s %-12s %-18s %-10s %-13s"
+        "%-23s %-16s %-42s %-34s %-6s %-12s %-22s %-10s %-13s"
         % (
             "TIMESTAMP",
             "INTERFACE",

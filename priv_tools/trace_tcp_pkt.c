@@ -25,6 +25,7 @@
 #define ROUTE_EVT_WRITE     (1<<10)
 #define ROUTE_EVT_FORWARD   (1<<11)
 #define ROUTE_EVT_POLL      (1<<12)
+#define ROUTE_EVT_FLUSH     (1<<13)
 
 #define ROUTE_D_OUT   (1<<23)
 
@@ -36,8 +37,10 @@
 #define CONN_ACTIVE_OUT     (1<<0)
 #define CONN_ACTIVE_SUCCESS (1<<1)
 #define CONN_ACTIVE_RUN     (1<<2)
+#define CONN_RW_ERR         (1<<3)
 
 
+#define FLUSH_INFO 10000
 #define UNEXPECT_CLOSE 10001
 #define POLL_TIMEOUT  10002
 #define RET_TIMEOUT  10003
@@ -369,7 +372,7 @@ static inline int do_trace(void *ctx, struct sk_buff *skb, __u32 op_evt)
 
     // Prepare event for userland
     struct route_evt_t evt = {.event_flags = op_evt, .pid = pid, .tgid  = k_pid, };
-    bpf_get_current_comm(evt.comm_name, sizeof(evt.comm_name));
+    bpf_get_current_comm(&evt.comm_name, sizeof(evt.comm_name));
 
     // Process packet
     if (!do_trace_skb(&evt, ctx, skb, op_evt)){
@@ -467,26 +470,38 @@ static inline int do_trace_state(void *ctx, struct sock *sk, int protocol, int o
 
     
     struct conn_active_status * conn_active_s = (struct conn_active_status*)conn_active_map.lookup((u64*)&sk);
-    if (conn_active_s && 0 == (conn_active_s->flags & CONN_ACTIVE_SUCCESS) && conn_active_s->flags & CONN_ACTIVE_OUT) {
-        u64 pid_tgid = bpf_get_current_pid_tgid();
-        u32 k_pid = pid_tgid & 0xFFFFFFFF;
-        u32 pid = pid_tgid >> 32; 
-        struct route_evt_t evt = {
-            .event_flags = ROUTE_EVT_CONNECT,
-            .pid  = pid,
-            .tgid  = k_pid,
-            .ip_version = 4,
-            .saddr = saddr,
-            .sport = sport,
-            .daddr = daddr,
-            .dport = dport
-        };
-        bpf_get_current_comm(evt.comm_name, sizeof(evt.comm_name));
+    if (!conn_active_s) { return 0; }
+ 
+    int b_conn_err = 0 == (conn_active_s->flags & CONN_ACTIVE_SUCCESS) && conn_active_s->flags & CONN_ACTIVE_OUT;
+    int b_rw_err = !!(conn_active_s->flags & CONN_RW_ERR);
+
+    if(!(b_conn_err||b_rw_err)) { return 0; }
+
+    u64 pid_tgid = bpf_get_current_pid_tgid();
+    u32 k_pid = pid_tgid & 0xFFFFFFFF;
+    u32 pid = pid_tgid >> 32; 
+    struct route_evt_t evt = {
+        .pid  = pid,
+        .tgid  = k_pid,
+        .ip_version = 4,
+        .saddr = saddr,
+        .sport = sport,
+        .daddr = daddr,
+        .dport = dport
+    };
+    if (b_conn_err){
+        evt.event_flags = ROUTE_EVT_CONNECT;
         evt.data[0] =  UNEXPECT_CLOSE;
-        evt.data[1] = (bpf_ktime_get_ns()/1000 - conn_active_s->conn_start) / 1000;
-        route_evt.perf_submit(ctx, &evt, sizeof(evt));
-        bpf_trace_printk("on connect error, ret %d, speedtime %d\n", evt.data[0], evt.data[1]); 
+    }else if (b_rw_err) {
+        evt.event_flags = ROUTE_EVT_FLUSH;
+        evt.data[0] =  FLUSH_INFO;
     }
+    
+
+    bpf_get_current_comm(&evt.comm_name, sizeof(evt.comm_name));
+    evt.data[1] = (bpf_ktime_get_ns()/1000 - conn_active_s->conn_start) / 1000;
+    route_evt.perf_submit(ctx, &evt, sizeof(evt));
+    bpf_trace_printk("on connect error, ret %d, speedtime %d, evt %d\n", evt.data[0], evt.data[1], evt.event_flags); 
 
     return 0;
 }
@@ -554,6 +569,7 @@ int tp_tcp_tcp_retransmit_skb(struct tracepoint__tcp__tcp_retransmit_skb *args){
         conn_active_s->evt_time = now;
         conn_active_s->ret_seq = tcb->seq;
     }else if(now - conn_active_s->evt_time > 1900000){
+        conn_active_s->flags |= CONN_RW_ERR;
         conn_active_s->evt_time = now;
         u64 pid_tgid = bpf_get_current_pid_tgid();
         u32 k_pid = pid_tgid & 0xFFFFFFFF;
@@ -568,7 +584,7 @@ int tp_tcp_tcp_retransmit_skb(struct tracepoint__tcp__tcp_retransmit_skb *args){
             .daddr = *(__u32*)args->daddr,
             .dport = bpf_htons(args->dport)
         };
-        bpf_get_current_comm(evt.comm_name, sizeof(evt.comm_name));
+        bpf_get_current_comm(&evt.comm_name, sizeof(evt.comm_name));
         evt.data[0] =  RET_TIMEOUT;
         evt.data[1] = (now - conn_active_s->ret_start) / 1000;
         route_evt.perf_submit((void*)args, &evt, sizeof(evt));
@@ -639,7 +655,7 @@ static inline int __ipt_do_table_out(struct pt_regs * ctx)
         return 0;
     }
 
-    bpf_get_current_comm(evt.comm_name, sizeof(evt.comm_name));
+    bpf_get_current_comm(&evt.comm_name, sizeof(evt.comm_name));
 
     // Store the hook
     const struct nf_hook_state *state = args->state;
@@ -780,7 +796,7 @@ int kretp_nf_nat_ipv4_out(struct pt_regs *ctx)
     const struct nf_hook_state *state = args->state;
     member_read(&evt.hook, state, hook);
 
-    bpf_get_current_comm(evt.comm_name, sizeof(evt.comm_name));
+    bpf_get_current_comm(&evt.comm_name, sizeof(evt.comm_name));
 
     route_evt.perf_submit(ctx, &evt, sizeof(evt));
 
@@ -822,7 +838,7 @@ int kretp_nf_nat_ipv4_in(struct pt_regs *ctx)
     const struct nf_hook_state *state = args->state;
     member_read(&evt.hook, state, hook);
 
-    bpf_get_current_comm(evt.comm_name, sizeof(evt.comm_name));
+    bpf_get_current_comm(&evt.comm_name, sizeof(evt.comm_name));
 
     route_evt.perf_submit(ctx, &evt, sizeof(evt));
 
@@ -940,7 +956,7 @@ int kretp___sys_connect(struct pt_regs *ctx) {
 
     clean_tcp_conn_trace(status->addr, status->port);
 
-    bpf_get_current_comm(evt.comm_name, sizeof(evt.comm_name));
+    bpf_get_current_comm(&evt.comm_name, sizeof(evt.comm_name));
     evt.daddr = status->addr; evt.dport = status->port;
     evt.data[0] =  0 - retval;
     evt.data[1] = (bpf_ktime_get_ns() - status->start) / 1000000;
@@ -1041,7 +1057,7 @@ int kretp_tcp_recvmsg(struct pt_regs *ctx) {
         .ip_version = 4,
     };
 
-    bpf_get_current_comm(evt.comm_name, sizeof(evt.comm_name));
+    bpf_get_current_comm(&evt.comm_name, sizeof(evt.comm_name));
     evt.daddr = status->addr; evt.dport = status->port;
     evt.data[0] =  retval;
     evt.data[1] = (bpf_ktime_get_ns() - status->start) / 1000000;
@@ -1121,14 +1137,16 @@ int kretp_tcp_poll(struct pt_regs *ctx){
         return 0; 
     }
 
+    conn_active_s->flags |= CONN_RW_ERR;
+
     struct route_evt_t evt = {
         .event_flags = ROUTE_EVT_POLL,
         .pid  = pid,
         .tgid  = k_pid,
         .ip_version = 4,
     };
-
-    bpf_get_current_comm(evt.comm_name, sizeof(evt.comm_name));
+    
+    bpf_get_current_comm(&evt.comm_name, sizeof(evt.comm_name));
 
     struct sock_common sock_comm;
     member_read(&sock_comm, sk, __sk_common);
@@ -1142,6 +1160,6 @@ int kretp_tcp_poll(struct pt_regs *ctx){
     evt.data[0] =  POLL_TIMEOUT;
     evt.data[1] = gap / 1000;
     route_evt.perf_submit(ctx, &evt, sizeof(evt));
-
+    bpf_trace_printk("on tcp_poll sock %p, %u:%d timeout\n", sk, status->addr, status->port);
     return 0;
 }

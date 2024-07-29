@@ -99,11 +99,20 @@ int tp_sock_inet_sock_set_state(struct tracepoint__sock__inet_sock_set_state *ar
 
     if (args->family != AF_INET) { return 0;} //only ipv4
 
-    if (args->newstate != TCP_CLOSE && args->newstate != TCP_CLOSE_WAIT) { return 0;}
+    if (args->newstate != TCP_CLOSE
+        && args->newstate != TCP_TIME_WAIT
+        && args->newstate != TCP_CLOSE_WAIT) 
+    { 
+        return 0;
+    }
     
     struct conn_active_status * conn_active_s = (struct conn_active_status*)conn_active_map.lookup((u64*)&sk);
     if(!conn_active_s) { return 0;}
     conn_active_map.delete((u64*)&sk);
+
+    if(args->newstate == TCP_CLOSE_WAIT){
+        return 0;
+    }
     
     __u64 now = bpf_ktime_get_ns()/1000/1000;
     __u64 idle_time = now - conn_active_s->last_active;
@@ -122,8 +131,8 @@ int tp_sock_inet_sock_set_state(struct tracepoint__sock__inet_sock_set_state *ar
 
     bpf_get_current_comm(&evt.comm_name, sizeof(evt.comm_name));
     connection_evt.perf_submit((void*)args, &evt, sizeof(evt));
-    bpf_trace_printk("on connect keepalive error, idle_time %ld < MIN_IDLE_TIME(ms), sport %d, dport %d\\n",
-        idle_time, sport, dport); 
+    bpf_trace_printk("on connect keepalive error, idle_time %ld < MIN_IDLE_TIME(ms), sport %d, newstate %d\\n",
+        idle_time, args->saddr, args->newstate);
     return 0;
 }
 
@@ -168,7 +177,16 @@ def event_handler(cpu, data, size):
     daddr = inet_ntop(AF_INET, pack("=I", event.daddr))
 
     flow = "%s:%s -> %s:%s" % (daddr, ntohs(event.dport), saddr, ntohs(event.sport))
-    print("%-23s %-42s %-13.1f %-13.1f" % (formatted_datetime, flow, event.idle_time/1000.0, event.live_time/1000.0))
+    print(
+        "%-23s %-42s %-13.1f %-13.1f %-24s" 
+        % (
+            formatted_datetime,
+            flow,
+            event.idle_time/1000.0,
+            event.live_time/1000.0,
+            event.comm_name
+        )
+    )
 
 
 def attch_all_probe():
@@ -211,7 +229,16 @@ if __name__ == "__main__":
         do_clean()
 
     signal.signal(signal.SIGTERM, signal_handler)
-    print("%-23s %-42s %-13s %-13s" % ("TIMESTAMP", "SOCKINFO", "IDLE_TIME", "LIVE_TIME"))
+    print(
+        "%-23s %-42s %-13s %-13s %-24s"
+        % (
+            "TIMESTAMP",
+            "SOCKINFO",
+            "IDLE_TIME",
+            "LIVE_TIME",
+            "COMMON_NAME"
+        )
+    )
 
     while 1:
         try:
