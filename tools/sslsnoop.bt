@@ -1,4 +1,4 @@
-#!/usr/bin/bpftrace
+#!/usr/bin/env bpftrace
 /*
  * sslsnoop	Trace SSL/TLS handshake for OpenSSL.
  * 		For Linux, uses bpftrace and eBPF.
@@ -11,6 +11,8 @@
  *
  * 15-Dec-2021	Tao Xu	created this.
  */
+
+config = { missing_probes = "ignore" }
 
 BEGIN
 {

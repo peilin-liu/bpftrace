@@ -13,8 +13,7 @@ namespace ast {
 class Program;
 }
 
-class ClangParser
-{
+class ClangParser {
 public:
   bool parse(ast::Program *program,
              BPFtrace &bpftrace,
@@ -39,7 +38,7 @@ private:
    * and update the input files with the definitions.
    */
   void resolve_incomplete_types_from_btf(BPFtrace &bpftrace,
-                                         const ast::ProbeList *probes);
+                                         const ast::ProbeList &probes);
 
   /*
    * Collect names of types defined by typedefs that are in non-included
@@ -66,15 +65,13 @@ private:
   std::vector<CXUnsavedFile> input_files;
   std::string btf_cdef;
 
-  class ClangParserHandler
-  {
+  class ClangParserHandler {
   public:
     ClangParserHandler();
 
     ~ClangParserHandler();
 
     bool parse_file(const std::string &filename,
-                    const std::string &input,
                     const std::vector<const char *> &args,
                     std::vector<CXUnsavedFile> &unsaved_files,
                     bool bail_on_errors = true);
@@ -93,7 +90,7 @@ private:
      * Return true if an error occurred. If bail_on_error is false, only fail
      * on fatal errors.
      */
-    bool check_diagnostics(const std::string &input, bool bail_on_error);
+    bool check_diagnostics(bool bail_on_error);
 
     CXCursor get_translation_unit_cursor();
 

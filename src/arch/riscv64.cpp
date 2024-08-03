@@ -1,4 +1,5 @@
 #include "arch.h"
+#include "utils.h"
 
 #include <algorithm>
 #include <array>
@@ -60,8 +61,7 @@ static std::array<std::string, 8> arg_registers = {
 int offset(std::string reg_name)
 {
   auto it = find(registers.begin(), registers.end(), reg_name);
-  if (it == registers.end())
-  {
+  if (it == registers.end()) {
     return -1;
   }
   return distance(registers.begin(), it);
@@ -104,7 +104,7 @@ std::string name()
 
 std::vector<std::string> invalid_watchpoint_modes()
 {
-  throw std::runtime_error(
+  throw FatalUserException(
       "Watchpoints are not supported on this architecture");
 }
 

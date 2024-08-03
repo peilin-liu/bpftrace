@@ -10,12 +10,7 @@ TEST(codegen, call_kstack)
 {
   auto result = NAME;
 
-  // Mode doesn't directly affect codegen, so the programs below should
-  // generate the same IR
-  test("kprobe:f { @x = kstack(); @y = kstack(6) }", result);
-  test("kprobe:f { @x = kstack(perf); @y = kstack(perf, 6) }", result);
-  test("kprobe:f { @x = kstack(raw); @y = kstack(raw, 6) }", result);
-  test("kprobe:f { @x = kstack(perf); @y = kstack(bpftrace) }", result);
+  test("kprobe:f { @x = kstack(); @y = kstack(6); @z = kstack(perf) }", result);
 }
 
 TEST(codegen, call_kstack_mapids)
@@ -28,31 +23,29 @@ TEST(codegen, call_kstack_mapids)
             0);
 
   ClangParser clang;
-  clang.parse(driver.root.get(), *bpftrace);
+  clang.parse(driver.ctx.root, *bpftrace);
 
   // Override to mockbpffeature.
   bpftrace->feature_ = std::make_unique<MockBPFfeature>(true);
-  ast::SemanticAnalyser semantics(driver.root.get(), *bpftrace);
+  ast::SemanticAnalyser semantics(driver.ctx, *bpftrace);
   ASSERT_EQ(semantics.analyse(), 0);
 
-  ast::ResourceAnalyser resource_analyser(driver.root.get());
+  ast::ResourceAnalyser resource_analyser(driver.ctx.root, *bpftrace);
   auto resources_optional = resource_analyser.analyse();
   ASSERT_TRUE(resources_optional.has_value());
-  auto resources = resources_optional.value();
-  ASSERT_EQ(resources.create_maps(*bpftrace, true), 0);
-  bpftrace->resources = resources;
+  bpftrace->resources = resources_optional.value();
 
-  ast::CodegenLLVM codegen(driver.root.get(), *bpftrace);
-  codegen.compile();
+  ast::CodegenLLVM codegen(driver.ctx.root, *bpftrace);
+  bpftrace->bytecode_ = codegen.compile();
 
-  ASSERT_EQ(std::distance(bpftrace->maps.begin(), bpftrace->maps.end()), 7);
-  ASSERT_EQ(bpftrace->maps.CountStackTypes(), 2U);
+  ASSERT_EQ(bpftrace->bytecode_.maps().size(), 8);
+  ASSERT_EQ(bpftrace->bytecode_.countStackMaps(), 3U);
 
   StackType stack_type;
   stack_type.limit = 5;
-  ASSERT_TRUE(bpftrace->maps.Has(stack_type));
+  ASSERT_TRUE(bpftrace->bytecode_.hasMap(stack_type));
   stack_type.limit = 6;
-  ASSERT_TRUE(bpftrace->maps.Has(stack_type));
+  ASSERT_TRUE(bpftrace->bytecode_.hasMap(stack_type));
 }
 
 TEST(codegen, call_kstack_modes_mapids)
@@ -66,33 +59,31 @@ TEST(codegen, call_kstack_modes_mapids)
             0);
 
   ClangParser clang;
-  clang.parse(driver.root.get(), *bpftrace);
+  clang.parse(driver.ctx.root, *bpftrace);
 
   // Override to mockbpffeature.
   bpftrace->feature_ = std::make_unique<MockBPFfeature>(true);
-  ast::SemanticAnalyser semantics(driver.root.get(), *bpftrace);
+  ast::SemanticAnalyser semantics(driver.ctx, *bpftrace);
   ASSERT_EQ(semantics.analyse(), 0);
 
-  ast::ResourceAnalyser resource_analyser(driver.root.get());
+  ast::ResourceAnalyser resource_analyser(driver.ctx.root, *bpftrace);
   auto resources_optional = resource_analyser.analyse();
   ASSERT_TRUE(resources_optional.has_value());
-  auto resources = resources_optional.value();
-  ASSERT_EQ(resources.create_maps(*bpftrace, true), 0);
-  bpftrace->resources = resources;
+  bpftrace->resources = resources_optional.value();
 
-  ast::CodegenLLVM codegen(driver.root.get(), *bpftrace);
-  codegen.compile();
+  ast::CodegenLLVM codegen(driver.ctx.root, *bpftrace);
+  bpftrace->bytecode_ = codegen.compile();
 
-  ASSERT_EQ(std::distance(bpftrace->maps.begin(), bpftrace->maps.end()), 9);
-  ASSERT_EQ(bpftrace->maps.CountStackTypes(), 3U);
+  ASSERT_EQ(bpftrace->bytecode_.maps().size(), 10);
+  ASSERT_EQ(bpftrace->bytecode_.countStackMaps(), 4U);
 
   StackType stack_type;
   stack_type.mode = StackMode::perf;
-  ASSERT_TRUE(bpftrace->maps.Has(stack_type));
+  ASSERT_TRUE(bpftrace->bytecode_.hasMap(stack_type));
   stack_type.mode = StackMode::bpftrace;
-  ASSERT_TRUE(bpftrace->maps.Has(stack_type));
+  ASSERT_TRUE(bpftrace->bytecode_.hasMap(stack_type));
   stack_type.mode = StackMode::raw;
-  ASSERT_TRUE(bpftrace->maps.Has(stack_type));
+  ASSERT_TRUE(bpftrace->bytecode_.hasMap(stack_type));
 }
 
 } // namespace codegen

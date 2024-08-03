@@ -60,13 +60,17 @@ TIMEOUT 5
 
 NAME unroll_max_value
 PROG i:ms:1 {$a = 1; unroll (101) { $a = $a + 2; } printf("a=%d\n", $a); exit();}
-EXPECT unroll maximum value is 100
+EXPECT stdin:1:17-29: ERROR: unroll maximum value is 100
+       i:ms:1 {$a = 1; unroll (101) { $a = $a + 2; } printf("a=%d\n", $a); exit();}
+                       ~~~~~~~~~~~~
 TIMEOUT 5
 WILL_FAIL
 
 NAME unroll_min_value
 PROG i:ms:1 {$a = 1; unroll (0) { $a = $a + 2; } printf("a=%d\n", $a); exit();}
-EXPECT unroll minimum value is 1
+EXPECT stdin:1:17-27: ERROR: unroll minimum value is 1
+       i:ms:1 {$a = 1; unroll (0) { $a = $a + 2; } printf("a=%d\n", $a); exit();}
+                       ~~~~~~~~~~
 TIMEOUT 5
 WILL_FAIL
 
@@ -77,7 +81,7 @@ TIMEOUT 5
 
 NAME unroll_printf
 PROG BEGIN { unroll (1) { printf("a"); } printf("b\n"); exit(); }
-EXPECT ab\n
+EXPECT ab
 TIMEOUT 5
 
 NAME if_compare_and_print_string
@@ -125,9 +129,14 @@ RUN {{BPFTRACE}} -e '$1 { printf("hello world\n"); exit(); }' i:ms:1
 EXPECT hello world
 TIMEOUT 1
 
+NAME positional unsigned hex
+RUN {{BPFTRACE}} -e 'BEGIN {printf("%lu", $1);}' 0xffffffffffffffff
+EXPECT 18446744073709551615
+TIMEOUT 1
+
 NAME string compare map lookup
 RUN {{BPFTRACE}} -e 't:syscalls:sys_enter_openat /comm == "syscall"/ { @[comm] = 1; }' -c "./testprogs/syscall openat"
-EXPECT @\[syscall\]: 1
+EXPECT @[syscall]: 1
 TIMEOUT 5
 
 NAME struct partial string compare - pass
@@ -180,7 +189,7 @@ RUN {{BPFTRACE}} -e 'BEGIN { printf("got: %d %o 0x%x\n", $1, $2, $3); exit() }' 
 EXPECT got: 123 775 0x123
 TIMEOUT 5
 
-NAME positional pointer arithmetics
+NAME positional pointer arithmetic
 RUN {{BPFTRACE}} -e 'BEGIN { printf("%s", str($1 + 1)); exit(); }' hello
 EXPECT ello
 TIMEOUT 1
@@ -191,10 +200,9 @@ EXPECT ok
 TIMEOUT 1
 
 NAME positional lhist
-RUN {{BPFTRACE}} -e 'kretprobe:vfs_read { @bytes = lhist(retval, $1, $2, $3); exit()}' 0 10000 1000
-EXPECT @bytes: *\n[\[(].*
+RUN {{BPFTRACE}} -e 'BEGIN { @ = lhist(0, $1, $2, $3); exit()}' 0 10000 1000
+EXPECT_REGEX @: *\n[\[(].*
 TIMEOUT 5
-AFTER ./testprogs/syscall read
 
 NAME positional buf
 RUN {{BPFTRACE}} -e 'BEGIN { @ = buf("hello", $1); exit(); }' 5
@@ -208,29 +216,31 @@ TIMEOUT 5
 AFTER ./testprogs/syscall nanosleep  1e8
 
 NAME positional ustack
-RUN {{BPFTRACE}} -e 'k:do_nanosleep { printf("SUCCESS %s\n%s\n", ustack(), ustack($1)); exit(); }' 1
-EXPECT SUCCESS
+RUN {{BPFTRACE}} -e 'u:./testprogs/uprobe_loop:uprobeFunction1 { printf("%s\n%s\n", ustack(), ustack($1)); exit(); }' 1
+EXPECT_REGEX .*uprobeFunction1\+[0-9]+\n\s+spin\+[0-9]+\n\s+main\+[0-9]+\n(?s:.*)\n\n\n\s+uprobeFunction1\+[0-9]+
 TIMEOUT 5
-AFTER ./testprogs/syscall nanosleep  1e8
+# Required to skip function prologue
+REQUIRES_FEATURE dwarf
+AFTER ./testprogs/uprobe_loop
 
 NAME lhist can be cleared
 PROG BEGIN{ @[1] = lhist(3,0,10,1); clear(@); exit() }
-EXPECT .*
+EXPECT_REGEX .*
 TIMEOUT 1
 
 NAME hist can be cleared
 PROG BEGIN{ @[1] = hist(1); clear(@); exit() }
-EXPECT .*
+EXPECT_REGEX .*
 TIMEOUT 1
 
 NAME stats can be cleared
 PROG BEGIN{ @[1] = stats(1); clear(@); exit() }
-EXPECT .*
+EXPECT_REGEX .*
 TIMEOUT 1
 
 NAME avg can be cleared
 PROG BEGIN{ @[1] = avg(1); clear(@); exit() }
-EXPECT .*
+EXPECT_REGEX .*
 TIMEOUT 1
 
 NAME sigint under heavy load
@@ -257,16 +267,52 @@ EXPECT @: 1
 TIMEOUT 1
 
 NAME map_assign_map_ptr
-PROG i:ms:100 { @ = curtask; @a = @; printf("%d\n", @a); exit(); }
-EXPECT -?[0-9]+
+PROG i:ms:100 { @ = curtask; @a = @; printf("%p\n", @a); exit(); }
+EXPECT_REGEX 0x[0-9a-f]+
 TIMEOUT 1
 
 NAME runtime_error_check_delete
 RUN {{BPFTRACE}} -k -e 'i:ms:100 { @[1] = 1; delete(@[2]); exit(); }'
-EXPECT WARNING: Failed to map_delete_elem: No such file or directory \(-2\)
+EXPECT stdin:1:22-34: WARNING: Can't delete map element because it does not exist.
+       Additional Info - helper: map_delete_elem, retcode: -2
+       i:ms:100 { @[1] = 1; delete(@[2]); exit(); }
+                            ~~~~~~~~~~~~
 TIMEOUT 1
 
 NAME runtime_error_check_lookup
 RUN {{BPFTRACE}} -kk -e 'i:ms:100 { @[1] = 1; printf("%d\n", @[2]); exit(); }'
-EXPECT WARNING: Failed to map_lookup_elem: 0
+EXPECT stdin:1:37-41: WARNING: Can't lookup map element because it does not exist.
+       Additional Info - helper: map_lookup_elem, retcode: 0
+       i:ms:100 { @[1] = 1; printf("%d\n", @[2]); exit(); }
+                                           ~~~~
 TIMEOUT 1
+
+NAME per_cpu_map_count_if
+PROG i:ms:1 { @ = count(); if (@ > 5) { printf("done\n"); exit(); }}
+EXPECT done
+TIMEOUT 5
+
+NAME per_cpu_map_min_if
+PROG BEGIN { @ = 10; } i:ms:1 { @--; @mn = min(@); if (@mn < 5) { printf("done\n"); exit(); }}
+EXPECT done
+TIMEOUT 5
+
+NAME per_cpu_map_max_if
+PROG BEGIN { @ = 1; } i:ms:1 { @++; @mx = max(@); if (@mx > 5) { printf("done\n"); exit(); }}
+EXPECT done
+TIMEOUT 5
+
+NAME per_cpu_map_avg_if
+PROG BEGIN { @ = avg(1); @ = avg(1); @ = avg(10); if (@ == 4) { printf("done\n"); exit(); }}
+EXPECT done
+TIMEOUT 5
+
+NAME per_cpu_map_arithmetic
+PROG BEGIN { @a = sum(10); @b = count(); $c = @a + @b; if ($c == 11) { printf("done\n"); } exit();}
+EXPECT done
+TIMEOUT 5
+
+NAME per_cpu_map_cast
+PROG BEGIN { @a = count(); @b = sum(10); printf("%d-%d\n", (uint64)@a, (int64)@b); exit();}
+EXPECT 1-10
+TIMEOUT 5

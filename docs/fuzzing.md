@@ -19,9 +19,9 @@ directly targets the function, but we need to write some glue code to connect a 
 ## bpftrace options for fuzzing
 bpftrace has several options useful for fuzzing.
 
-### `BPFTRACE_NODE_MAX` environment variable
+### `BPFTRACE_MAX_AST_NODES` environment variable
 When doing fuzzing, it is important to limit the number of AST nodes because otherwise, a fuzzer might
-keep generating a very long program that causes a stack overflow.  `BPFTRACE_NODE_MAX` environment
+keep generating a very long program that causes a stack overflow.  `BPFTRACE_MAX_AST_NODES` environment
 variable controls the maximum number of AST nodes.
 
 ## Fuzzing with AFL
@@ -82,7 +82,7 @@ FUZZER=/path/to/AFLplusplus/afl-fuzz
 
 sudo AFL_NO_AFFINITY=1 \
      ASAN_OPTIONS=detect_leaks=0:abort_on_error=1:symbolize=0 \
-     BPFTRACE_NODE_MAX=200 \
+     BPFTRACE_MAX_AST_NODES=200 \
      taskset -c ${CPU} \
      $FUZZER -M 0 -m none -i ./input -o ./output -t 3000 -- \
      ./src/bpftrace_fuzz @@
@@ -144,25 +144,25 @@ parallel -N1 "sed -e '/^#\!/d' -e '/\/\*.*/d' -e '/^\s\*.*/d' -e '/\/\/.*/d' -e 
 
 ## Found bugs
 ### AFL
-- [#1623](https://github.com/iovisor/bpftrace/pull/1623)
-- [#1619](https://github.com/iovisor/bpftrace/pull/1619)
-- [#1580](https://github.com/iovisor/bpftrace/pull/1580)
-- [#1573](https://github.com/iovisor/bpftrace/pull/1573)
-- [#1572](https://github.com/iovisor/bpftrace/pull/1572)
-- [#1570](https://github.com/iovisor/bpftrace/pull/1570)
-- [#1568](https://github.com/iovisor/bpftrace/pull/1568)
-- [#1286](https://github.com/iovisor/bpftrace/pull/1286)
-- [#1245](https://github.com/iovisor/bpftrace/pull/1245)
-- [#1234](https://github.com/iovisor/bpftrace/pull/1234)
-- [#1229](https://github.com/iovisor/bpftrace/pull/1229)
-- [#1224](https://github.com/iovisor/bpftrace/pull/1224)
-- [#1222](https://github.com/iovisor/bpftrace/pull/1222)
-- [#1221](https://github.com/iovisor/bpftrace/pull/1221)
-- [#1210](https://github.com/iovisor/bpftrace/pull/1210)
-- [#1205](https://github.com/iovisor/bpftrace/pull/1205)
+- [#1623](https://github.com/bpftrace/bpftrace/pull/1623)
+- [#1619](https://github.com/bpftrace/bpftrace/pull/1619)
+- [#1580](https://github.com/bpftrace/bpftrace/pull/1580)
+- [#1573](https://github.com/bpftrace/bpftrace/pull/1573)
+- [#1572](https://github.com/bpftrace/bpftrace/pull/1572)
+- [#1570](https://github.com/bpftrace/bpftrace/pull/1570)
+- [#1568](https://github.com/bpftrace/bpftrace/pull/1568)
+- [#1286](https://github.com/bpftrace/bpftrace/pull/1286)
+- [#1245](https://github.com/bpftrace/bpftrace/pull/1245)
+- [#1234](https://github.com/bpftrace/bpftrace/pull/1234)
+- [#1229](https://github.com/bpftrace/bpftrace/pull/1229)
+- [#1224](https://github.com/bpftrace/bpftrace/pull/1224)
+- [#1222](https://github.com/bpftrace/bpftrace/pull/1222)
+- [#1221](https://github.com/bpftrace/bpftrace/pull/1221)
+- [#1210](https://github.com/bpftrace/bpftrace/pull/1210)
+- [#1205](https://github.com/bpftrace/bpftrace/pull/1205)
 
 ### libFuzzer
-- [#1653](https://github.com/iovisor/bpftrace/pull/1653)
-- [#1650](https://github.com/iovisor/bpftrace/pull/1650)
-- [#1622](https://github.com/iovisor/bpftrace/pull/1622)
-- [#1621](https://github.com/iovisor/bpftrace/pull/1621)
+- [#1653](https://github.com/bpftrace/bpftrace/pull/1653)
+- [#1650](https://github.com/bpftrace/bpftrace/pull/1650)
+- [#1622](https://github.com/bpftrace/bpftrace/pull/1622)
+- [#1621](https://github.com/bpftrace/bpftrace/pull/1621)

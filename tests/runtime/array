@@ -12,7 +12,7 @@ AFTER ./testprogs/array_access
 
 NAME array element access - out of bounds
 PROG struct A { int x[4]; } uprobe:./testprogs/array_access:test_struct { $a = (struct A *) arg0; $x = $a->x[5]; printf("%d\n", $x); exit(); }
-EXPECT the index 5 is out of bounds for array of size 4
+EXPECT stdin:1:100-108: ERROR: the index 5 is out of bounds for array of size 4
 TIMEOUT 5
 AFTER ./testprogs/array_access
 WILL_FAIL
@@ -37,31 +37,31 @@ AFTER ./testprogs/array_access
 
 NAME array assignment into map
 PROG struct A { int x[4]; } uprobe:./testprogs/array_access:test_struct { @a = ((struct A *) arg0)->x; exit(); }
-EXPECT @a: \[1,2,3,4\]
+EXPECT @a: [1,2,3,4]
 TIMEOUT 5
 AFTER ./testprogs/array_access
 
 NAME array as a map key
 PROG struct A { int x[4]; } uprobe:./testprogs/array_access:test_struct { @x[((struct A *) arg0)->x] = 0; exit(); }
-EXPECT @x\[\[1,2,3,4\]\]: 0
+EXPECT @x[[1,2,3,4]]: 0
 TIMEOUT 5
 AFTER ./testprogs/array_access
 
 NAME array as a part of map multikey
 PROG struct A { int x[4]; } uprobe:./testprogs/array_access:test_struct { @x[((struct A *) arg0)->x, 42] = 0; exit(); }
-EXPECT @x\[\[1,2,3,4\], 42\]: 0
+EXPECT @x[[1,2,3,4], 42]: 0
 TIMEOUT 5
 AFTER ./testprogs/array_access
 
 NAME array as a map key assigned from another map
 PROG struct A { int x[4]; } uprobe:./testprogs/array_access:test_struct { @a = ((struct A *) arg0)->x; @x[@a] = 0; exit(); }
-EXPECT @x\[\[1,2,3,4\]\]: 0
+EXPECT @x[[1,2,3,4]]: 0
 TIMEOUT 5
 AFTER ./testprogs/array_access
 
 NAME array in a tuple
 PROG struct A { int x[4]; } uprobe:./testprogs/array_access:test_struct { @x = (1, ((struct A *) arg0)->x); exit(); }
-EXPECT @x: \(1, \[1,2,3,4\]\)
+EXPECT @x: (1, [1,2,3,4])
 TIMEOUT 5
 AFTER ./testprogs/array_access
 
@@ -91,19 +91,19 @@ AFTER ./testprogs/array_access
 
 NAME multi-dimensional array assignment into map
 PROG struct B { int y[2][2]; } uprobe:./testprogs/array_access:test_struct { @b = ((struct B *) arg1)->y; exit(); }
-EXPECT @b: \[\[5,6\],\[7,8\]\]
+EXPECT @b: [[5,6],[7,8]]
 TIMEOUT 5
 AFTER ./testprogs/array_access
 
 NAME multi-dimensional array as a map key
 PROG struct B { int y[2][2]; } uprobe:./testprogs/array_access:test_struct { @x[((struct B *) arg1)->y] = 0; exit(); }
-EXPECT @x\[\[\[5,6\],\[7,8\]\]]: 0
+EXPECT @x[[[5,6],[7,8]]]: 0
 TIMEOUT 5
 AFTER ./testprogs/array_access
 
 NAME multi-dimensional array as a map key assigned from another map
 PROG struct B { int y[2][2]; } uprobe:./testprogs/array_access:test_struct { @b = ((struct B *) arg1)->y; @x[@b] = 0; exit(); }
-EXPECT @x\[\[\[5,6\],\[7,8\]\]]: 0
+EXPECT @x[[[5,6],[7,8]]]: 0
 TIMEOUT 5
 AFTER ./testprogs/array_access
 
@@ -164,5 +164,27 @@ AFTER ./testprogs/array_access
 NAME variable array element access - assign to map
 PROG struct D { int x; int y[0]; } uprobe:./testprogs/array_access:test_variable_array { $a = (struct D *) arg0; @y = $a->y[0]; exit(); }
 EXPECT @y: 1
+TIMEOUT 5
+AFTER ./testprogs/array_access
+
+NAME cast literal to int array
+PROG BEGIN { printf("first byte: %x\n", ((int8[8])12345)[0]); exit(); }
+EXPECT first byte: 39
+TIMEOUT 1
+
+NAME cast to int array with automatic size
+PROG BEGIN { printf("byte: %x\n", ((int8[])12345)[0]); exit(); }
+EXPECT byte: 39
+TIMEOUT 1
+
+NAME cast int array to int internal
+PROG BEGIN { printf("ip: %x\n", (uint32)pton("127.0.0.1")); exit(); }
+EXPECT ip: 100007f
+TIMEOUT 5
+AFTER ./testprogs/array_access
+
+NAME cast int array to int proberead
+RUN {{BPFTRACE}} --include "stdint.h" -e 'struct A { int x[4]; uint8_t y[4]; } uprobe:./testprogs/array_access:test_arrays { $y = (int32)((struct A *)arg0)->y; printf("y: %x\n", $y); exit()}'
+EXPECT y: ddccbbaa
 TIMEOUT 5
 AFTER ./testprogs/array_access

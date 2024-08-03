@@ -7,7 +7,6 @@
 #include "bpftrace.h"
 #include "clang_parser.h"
 #include "driver.h"
-#include "fake_map.h"
 #include "mocks.h"
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
@@ -29,25 +28,23 @@ void gen_bytecode(const std::string &input, std::stringstream &out)
 
   ASSERT_EQ(driver.parse_str(input), 0);
 
-  ast::FieldAnalyser fields(driver.root.get(), *bpftrace);
+  ast::FieldAnalyser fields(driver.ctx.root, *bpftrace);
   EXPECT_EQ(fields.analyse(), 0);
 
   ClangParser clang;
-  clang.parse(driver.root.get(), *bpftrace);
+  clang.parse(driver.ctx.root, *bpftrace);
 
   // Override to mockbpffeature.
   bpftrace->feature_ = std::make_unique<MockBPFfeature>(true);
-  ast::SemanticAnalyser semantics(driver.root.get(), *bpftrace);
+  ast::SemanticAnalyser semantics(driver.ctx, *bpftrace);
   ASSERT_EQ(semantics.analyse(), 0);
 
-  ast::ResourceAnalyser resource_analyser(driver.root.get());
+  ast::ResourceAnalyser resource_analyser(driver.ctx.root, *bpftrace);
   auto resources_optional = resource_analyser.analyse();
   ASSERT_TRUE(resources_optional.has_value());
-  auto resources = resources_optional.value();
-  ASSERT_EQ(resources.create_maps(*bpftrace, true), 0);
-  bpftrace->resources = resources;
+  bpftrace->resources = resources_optional.value();
 
-  ast::CodegenLLVM codegen(driver.root.get(), *bpftrace);
+  ast::CodegenLLVM codegen(driver.ctx.root, *bpftrace);
   codegen.generate_ir();
   codegen.DumpIR(out);
 }
@@ -70,14 +67,13 @@ TEST(probe, short_name)
   compare_bytecode("kretprobe:f { pid }", "kr:f { pid }");
   compare_bytecode("uprobe:sh:f { 1 }", "u:sh:f { 1 }");
   compare_bytecode("profile:hz:997 { 1 }", "p:hz:997 { 1 }");
-  compare_bytecode("hardware:cache-references:1000000 { 1 }", "h:cache-references:1000000 { 1 }");
+  compare_bytecode("hardware:cache-references:1000000 { 1 }",
+                   "h:cache-references:1000000 { 1 }");
   compare_bytecode("software:faults:1000 { 1 }", "s:faults:1000 { 1 }");
   compare_bytecode("interval:s:1 { 1 }", "i:s:1 { 1 }");
 }
 
-class probe_btf : public test_btf
-{
-};
+class probe_btf : public test_btf {};
 
 TEST_F(probe_btf, short_name)
 {

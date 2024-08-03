@@ -1,4 +1,5 @@
 #include "arch.h"
+#include "utils.h"
 
 #include <algorithm>
 #include <array>
@@ -100,13 +101,11 @@ static std::array<std::string, 8> arg_registers = {
 int offset(std::string reg_name)
 {
   auto it = find(registers.begin(), registers.end(), reg_name);
-  if (it == registers.end())
-  {
+  if (it == registers.end()) {
     // Also allow register names that match the fields in struct pt_regs.
     // These appear in USDT probe arguments.
     it = find(ptrace_registers.begin(), ptrace_registers.end(), reg_name);
-    if (it == ptrace_registers.end())
-    {
+    if (it == ptrace_registers.end()) {
       return -1;
     }
     return distance(ptrace_registers.begin(), it);
@@ -151,7 +150,7 @@ std::string name()
 
 std::vector<std::string> invalid_watchpoint_modes()
 {
-  throw std::runtime_error(
+  throw FatalUserException(
       "Watchpoints are not supported on this architecture");
 }
 

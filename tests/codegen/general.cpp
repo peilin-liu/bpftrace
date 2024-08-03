@@ -9,14 +9,14 @@ namespace codegen {
 
 using ::testing::_;
 
-class MockBPFtrace : public BPFtrace
-{
+class MockBPFtrace : public BPFtrace {
 public:
 #pragma GCC diagnostic push
 #ifdef __clang__
 #pragma GCC diagnostic ignored "-Winconsistent-missing-override"
 #endif
-  MOCK_METHOD1(add_probe, int(ast::Probe &p));
+  MOCK_METHOD3(add_probe,
+               int(const ast::AttachPoint &, const ast::Probe &, int));
 #pragma GCC diagnostic pop
 
   int resolve_uname(const std::string &name,
@@ -47,23 +47,6 @@ public:
   }
 };
 
-TEST(codegen, populate_sections)
-{
-  auto bpftrace = get_mock_bpftrace();
-  Driver driver(*bpftrace);
-
-  ASSERT_EQ(driver.parse_str("kprobe:foo { 1 } kprobe:bar { 1 }"), 0);
-  // Override to mockbpffeature.
-  bpftrace->feature_ = std::make_unique<MockBPFfeature>(true);
-  ast::SemanticAnalyser semantics(driver.root.get(), *bpftrace);
-  ASSERT_EQ(semantics.analyse(), 0);
-  ast::CodegenLLVM codegen(driver.root.get(), *bpftrace);
-  auto bytecode = codegen.compile();
-
-  EXPECT_NE(bytecode.find("s_kprobe:foo_1"), bytecode.end());
-  EXPECT_NE(bytecode.find("s_kprobe:bar_2"), bytecode.end());
-}
-
 TEST(codegen, printf_offsets)
 {
   auto bpftrace = get_mock_bpftrace();
@@ -78,24 +61,22 @@ TEST(codegen, printf_offsets)
                 "}"),
             0);
   ClangParser clang;
-  clang.parse(driver.root.get(), *bpftrace);
+  clang.parse(driver.ctx.root, *bpftrace);
 
   // Override to mockbpffeature.
   bpftrace->feature_ = std::make_unique<MockBPFfeature>(true);
-  ast::SemanticAnalyser semantics(driver.root.get(), *bpftrace);
+  ast::SemanticAnalyser semantics(driver.ctx, *bpftrace);
   ASSERT_EQ(semantics.analyse(), 0);
 
-  ast::ResourceAnalyser resource_analyser(driver.root.get());
+  ast::ResourceAnalyser resource_analyser(driver.ctx.root, *bpftrace);
   auto resources_optional = resource_analyser.analyse();
   ASSERT_TRUE(resources_optional.has_value());
-  auto resources = resources_optional.value();
-  ASSERT_EQ(resources.create_maps(*bpftrace, true), 0);
-  bpftrace->resources = resources;
+  bpftrace->resources = resources_optional.value();
 
-  ast::CodegenLLVM codegen(driver.root.get(), *bpftrace);
+  ast::CodegenLLVM codegen(driver.ctx.root, *bpftrace);
   codegen.generate_ir();
 
-  EXPECT_EQ(resources.printf_args.size(), 1U);
+  EXPECT_EQ(bpftrace->resources.printf_args.size(), 1U);
   auto fmt = std::get<0>(bpftrace->resources.printf_args[0]).str();
   auto &args = std::get<1>(bpftrace->resources.printf_args[0]);
 
@@ -105,19 +86,19 @@ TEST(codegen, printf_offsets)
 
   // Note that scalar types are promoted to 64-bits when put into
   // a perf event buffer
-  EXPECT_EQ(args[0].type.type, Type::integer);
+  EXPECT_TRUE(args[0].type.IsIntTy());
   EXPECT_EQ(args[0].type.GetSize(), 8U);
   EXPECT_EQ(args[0].offset, 8);
 
-  EXPECT_EQ(args[1].type.type, Type::integer);
+  EXPECT_TRUE(args[1].type.IsIntTy());
   EXPECT_EQ(args[1].type.GetSize(), 8U);
   EXPECT_EQ(args[1].offset, 16);
 
-  EXPECT_EQ(args[2].type.type, Type::string);
+  EXPECT_TRUE(args[2].type.IsStringTy());
   EXPECT_EQ(args[2].type.GetSize(), 10U);
   EXPECT_EQ(args[2].offset, 24);
 
-  EXPECT_EQ(args[3].type.type, Type::integer);
+  EXPECT_TRUE(args[3].type.IsIntTy());
   EXPECT_EQ(args[3].type.GetSize(), 8U);
   EXPECT_EQ(args[3].offset, 40);
 }
@@ -125,16 +106,16 @@ TEST(codegen, printf_offsets)
 TEST(codegen, probe_count)
 {
   MockBPFtrace bpftrace;
-  EXPECT_CALL(bpftrace, add_probe(_)).Times(2);
+  EXPECT_CALL(bpftrace, add_probe(_, _, _)).Times(2);
 
   Driver driver(bpftrace);
 
   ASSERT_EQ(driver.parse_str("kprobe:f { 1; } kprobe:d { 1; }"), 0);
   // Override to mockbpffeature.
   bpftrace.feature_ = std::make_unique<MockBPFfeature>(true);
-  ast::SemanticAnalyser semantics(driver.root.get(), bpftrace);
+  ast::SemanticAnalyser semantics(driver.ctx, bpftrace);
   ASSERT_EQ(semantics.analyse(), 0);
-  ast::CodegenLLVM codegen(driver.root.get(), bpftrace);
+  ast::CodegenLLVM codegen(driver.ctx.root, bpftrace);
   codegen.generate_ir();
 }
 } // namespace codegen

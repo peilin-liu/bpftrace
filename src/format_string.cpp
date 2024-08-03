@@ -1,6 +1,7 @@
 #include "format_string.h"
 #include "log.h"
 #include "struct.h"
+#include "utils.h"
 
 #include <unordered_map>
 
@@ -24,8 +25,7 @@ ArgumentType get_expected_argument_type(const std::string &fmt)
 {
   std::smatch match;
 
-  if (std::regex_search(fmt, match, length_modifier_re))
-  {
+  if (std::regex_search(fmt, match, length_modifier_re)) {
     if (match[2] == "p")
       return ArgumentType::POINTER;
     else if (match[2] == "c")
@@ -54,31 +54,27 @@ std::string validate_format_string(const std::string &fmt,
 
   auto num_tokens = std::distance(tokens_begin, tokens_end);
   int num_args = args.size();
-  if (num_args < num_tokens)
-  {
+  if (num_args < num_tokens) {
     message << call_func << ": Not enough arguments for format string ("
             << num_args << " supplied, " << num_tokens << " expected)"
             << std::endl;
     return message.str();
   }
-  if (num_args > num_tokens)
-  {
+  if (num_args > num_tokens) {
     message << call_func << ": Too many arguments for format string ("
             << num_args << " supplied, " << num_tokens << " expected)"
             << std::endl;
     return message.str();
   }
-  if (call_func == "debugf" && num_args > PRINTK_MAX_ARGS)
-  {
+  if (call_func == "debugf" && num_args > PRINTK_MAX_ARGS) {
     message << call_func << ": Cannot use more than " << PRINTK_MAX_ARGS
             << " conversion specifiers" << std::endl;
     return message.str();
   }
 
   auto token_iter = tokens_begin;
-  for (int i = 0; i < num_args; i++, token_iter++)
-  {
-    Type arg_type = args.at(i).type.type;
+  for (int i = 0; i < num_args; i++, token_iter++) {
+    Type arg_type = args.at(i).type.GetTy();
     if (arg_type == Type::ksym || arg_type == Type::usym ||
         arg_type == Type::probe || arg_type == Type::username ||
         arg_type == Type::kstack || arg_type == Type::ustack ||
@@ -103,16 +99,14 @@ std::string validate_format_string(const std::string &fmt,
                                   ? bpf_trace_printk_format_types
                                   : printf_format_types;
     const auto token_type_iter = format_types.find(token);
-    if (token_type_iter == format_types.end())
-    {
+    if (token_type_iter == format_types.end()) {
       message << call_func << ": Unknown format string token: %" << token
               << std::endl;
       return message.str();
     }
     const Type &token_type = token_type_iter->second;
 
-    if (arg_type != token_type)
-    {
+    if (arg_type != token_type) {
       message << call_func << ": %" << token
               << " specifier expects a value of type " << token_type << " ("
               << arg_type << " supplied)" << std::endl;
@@ -130,15 +124,13 @@ void FormatString::split()
   auto tokens_end = std::sregex_iterator();
 
   size_t last_pos = 0;
-  for (std::regex_iterator i = tokens_begin; i != tokens_end; i++)
-  {
+  for (std::regex_iterator i = tokens_begin; i != tokens_end; i++) {
     int end = i->position() + i->length();
     parts_.push_back(fmt_.substr(last_pos, end - last_pos));
     last_pos = end;
   }
 
-  if (last_pos != fmt_.length())
-  {
+  if (last_pos != fmt_.length()) {
     parts_.push_back(fmt_.substr(last_pos));
   }
 }
@@ -146,8 +138,7 @@ void FormatString::split()
 void FormatString::format(std::ostream &out,
                           std::vector<std::unique_ptr<IPrintable>> &args)
 {
-  if (parts_.size() < 1)
-  {
+  if (parts_.size() < 1) {
     split();
 
     // figure out the argument type for each format specifier
@@ -157,27 +148,24 @@ void FormatString::format(std::ostream &out,
   }
   auto buffer = std::vector<char>(FMT_BUF_SZ);
   auto check_snprintf_ret = [](int r) {
-    if (r < 0)
-    {
-      LOG(FATAL) << "format() error occurred: " << std::strerror(errno);
+    if (r < 0) {
+      char *e = std::strerror(errno);
+      throw FatalUserException("format() error occurred: " +
+                               std::string(e ? e : ""));
     }
   };
 
   size_t i = 0;
-  for (; i < args.size(); i++)
-  {
-    for (int try_ = 0; try_ < 2; try_++)
-    {
+  for (; i < args.size(); i++) {
+    for (int try_ = 0; try_ < 2; try_++) {
       // find format specified in the string
       auto last_percent_sign = parts_[i].find_last_of('%');
       std::string fmt_string = last_percent_sign != std::string::npos
                                    ? parts_[i].substr(last_percent_sign)
                                    : "";
       std::string printf_fmt;
-      if (fmt_string == "%r" || fmt_string == "%rx" || fmt_string == "%rh")
-      {
-        if (fmt_string == "%rx" || fmt_string == "%rh")
-        {
+      if (fmt_string == "%r" || fmt_string == "%rx" || fmt_string == "%rh") {
+        if (fmt_string == "%rx" || fmt_string == "%rh") {
           auto printable_buffer = dynamic_cast<PrintableBuffer *>(&*args.at(i));
           // this is checked by semantic analyzer
           assert(printable_buffer);
@@ -189,9 +177,7 @@ void FormatString::format(std::ostream &out,
         printf_fmt = std::regex_replace(parts_[i],
                                         std::regex("%r[x|h]?"),
                                         "%s");
-      }
-      else
-      {
+      } else {
         printf_fmt = parts_[i];
       }
       int r = args.at(i)->print(buffer.data(),
@@ -210,8 +196,7 @@ void FormatString::format(std::ostream &out,
 
     out << buffer.data();
   }
-  if (i < parts_.size())
-  {
+  if (i < parts_.size()) {
     out << parts_[i];
   }
 }

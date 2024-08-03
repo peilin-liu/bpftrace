@@ -1,7 +1,10 @@
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
+#include <fstream>
+#include <iostream>
 #include <sstream>
 #include <string>
+#include <system_error>
 
 #include <fcntl.h>
 #include <signal.h>
@@ -10,6 +13,7 @@
 
 #include "child.h"
 #include "childhelper.h"
+#include "filesystem.h"
 #include "utils.h"
 
 namespace bpftrace {
@@ -24,13 +28,10 @@ using ::testing::HasSubstr;
 
 TEST(childproc, exe_does_not_exist)
 {
-  try
-  {
+  try {
     ChildProc child("/does/not/exist/abc/fed");
     FAIL();
-  }
-  catch (const std::runtime_error &e)
-  {
+  } catch (const std::runtime_error &e) {
     EXPECT_THAT(e.what(), HasSubstr("does not exist or is not executable"));
   }
 }
@@ -42,13 +43,10 @@ TEST(childproc, too_many_arguments)
   for (int i = 0; i < 280; i++)
     cmd << " a";
 
-  try
-  {
+  try {
     ChildProc child(cmd.str());
     FAIL();
-  }
-  catch (const std::runtime_error &e)
-  {
+  } catch (const std::runtime_error &e) {
     EXPECT_THAT(e.what(), HasSubstr("Too many arguments"));
   }
 }
@@ -202,6 +200,62 @@ TEST(childproc, ptrace_child_term_before_execve)
   EXPECT_FALSE(child->is_alive());
   EXPECT_EQ(child->exit_code(), -1);
   EXPECT_EQ(child->term_signal(), 15);
+}
+
+TEST(childproc, multi_exec_match)
+{
+  std::error_code ec;
+
+  // Create directory for test
+  std::string tmpdir = "/tmp/bpftrace-test-child-XXXXXX";
+  ASSERT_NE(::mkdtemp(&tmpdir[0]), nullptr);
+
+  // Create fixture directories
+  const auto path = std_filesystem::path(tmpdir);
+  const auto usr_bin = path / "usr" / "bin";
+  ASSERT_TRUE(std_filesystem::create_directories(usr_bin, ec));
+  ASSERT_FALSE(ec);
+
+  // Create symbolic link: bin -> usr/bin
+  const auto symlink_bin = path / "bin";
+  std_filesystem::create_directory_symlink(usr_bin, symlink_bin, ec);
+  ASSERT_FALSE(ec);
+
+  // Copy a 'mysleep' binary and add x permission
+  const auto binary = usr_bin / "mysleep";
+  {
+    std::ifstream src;
+    std::ofstream dst;
+
+    src.open("/bin/sleep", std::ios::in | std::ios::binary);
+    dst.open(binary, std::ios::out | std::ios::binary);
+    dst << src.rdbuf();
+    src.close();
+    dst.close();
+
+    EXPECT_EQ(::chmod(binary.c_str(), 0755), 0);
+  }
+
+  // Set ENV
+  auto old_path = ::getenv("PATH");
+  auto new_path = usr_bin.native(); // copy
+  new_path += ":";
+  new_path += symlink_bin.c_str();
+  EXPECT_EQ(::setenv("PATH", new_path.c_str(), 1), 0);
+
+  // 'mysleep' will match /bin/mysleep and /usr/bin/mysleep, but they are
+  // actually the same file.
+  auto child = getChild("mysleep 5");
+
+  child->run();
+  child->terminate();
+  wait_for(child.get(), 100);
+  EXPECT_FALSE(child->is_alive());
+  EXPECT_EQ(child->term_signal(), SIGTERM);
+
+  // Cleanup
+  EXPECT_EQ(::setenv("PATH", old_path, 1), 0);
+  EXPECT_GT(std_filesystem::remove_all(tmpdir), 0);
 }
 
 } // namespace child

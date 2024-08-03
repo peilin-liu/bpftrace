@@ -3,13 +3,13 @@
 #include "ast/pass_manager.h"
 #include "ast/visitors.h"
 #include "bpftrace.h"
+#include "config.h"
 #include "log.h"
 
 namespace bpftrace {
 namespace ast {
 
-class NodeCounter : public Visitor
-{
+class NodeCounter : public Visitor {
 public:
   void Visit(Node &node) override
   {
@@ -32,13 +32,9 @@ inline Pass CreateCounterPass()
     NodeCounter c;
     c.Visit(n);
     auto node_count = c.get_count();
-    auto max = ctx.b.ast_max_nodes_;
-    if (bt_verbose)
-    {
-      LOG(INFO) << "node count: " << node_count;
-    }
-    if (node_count >= max)
-    {
+    auto max = ctx.b.max_ast_nodes_;
+    LOG(V1) << "AST node count: " << node_count;
+    if (node_count >= max) {
       LOG(ERROR) << "node count (" << node_count << ") exceeds the limit ("
                  << max << ")";
       return PassResult::Error("NodeCounter", "node count exceeded");

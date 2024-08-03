@@ -8,21 +8,20 @@
 #include "ast/visitors.h"
 #include "bpffeature.h"
 #include "bpftrace.h"
-#include "map.h"
+#include "config.h"
 #include "types.h"
 
 namespace bpftrace {
 namespace ast {
 
-class SemanticAnalyser : public Visitor
-{
+class SemanticAnalyser : public Visitor {
 public:
-  explicit SemanticAnalyser(Node *root,
+  explicit SemanticAnalyser(ASTContext &ctx,
                             BPFtrace &bpftrace,
                             std::ostream &out = std::cerr,
                             bool has_child = true,
                             bool listing = false)
-      : root_(root),
+      : ctx_(ctx),
         bpftrace_(bpftrace),
         out_(out),
         listing_(listing),
@@ -30,16 +29,16 @@ public:
   {
   }
 
-  explicit SemanticAnalyser(Node *root, BPFtrace &bpftrace, bool has_child)
-      : SemanticAnalyser(root, bpftrace, std::cerr, has_child)
+  explicit SemanticAnalyser(ASTContext &ctx, BPFtrace &bpftrace, bool has_child)
+      : SemanticAnalyser(ctx, bpftrace, std::cerr, has_child)
   {
   }
 
-  explicit SemanticAnalyser(Node *root,
+  explicit SemanticAnalyser(ASTContext &ctx,
                             BPFtrace &bpftrace,
                             bool has_child,
                             bool listing)
-      : SemanticAnalyser(root, bpftrace, std::cerr, has_child, listing)
+      : SemanticAnalyser(ctx, bpftrace, std::cerr, has_child, listing)
   {
   }
 
@@ -57,6 +56,7 @@ public:
   void visit(Binop &binop) override;
   void visit(Unop &unop) override;
   void visit(While &while_block) override;
+  void visit(For &f) override;
   void visit(Jump &jump) override;
   void visit(Ternary &ternary) override;
   void visit(FieldAccess &acc) override;
@@ -66,17 +66,20 @@ public:
   void visit(ExprStatement &expr) override;
   void visit(AssignMapStatement &assignment) override;
   void visit(AssignVarStatement &assignment) override;
+  void visit(AssignConfigVarStatement &assignment) override;
   void visit(If &if_block) override;
   void visit(Unroll &unroll) override;
   void visit(Predicate &pred) override;
   void visit(AttachPoint &ap) override;
   void visit(Probe &probe) override;
+  void visit(Config &config) override;
+  void visit(Subprog &subprog) override;
   void visit(Program &program) override;
 
   int analyse();
 
 private:
-  Node *root_ = nullptr;
+  ASTContext &ctx_;
   BPFtrace &bpftrace_;
   std::ostream &out_;
   std::ostringstream err_;
@@ -86,9 +89,14 @@ private:
 
   bool is_final_pass() const;
 
-  bool check_assignment(const Call &call, bool want_map, bool want_var, bool want_map_key);
-  bool check_nargs(const Call &call, size_t expected_nargs);
-  bool check_varargs(const Call &call, size_t min_nargs, size_t max_nargs);
+  bool check_assignment(const Call &call,
+                        bool want_map,
+                        bool want_var,
+                        bool want_map_key);
+  [[nodiscard]] bool check_nargs(const Call &call, size_t expected_nargs);
+  [[nodiscard]] bool check_varargs(const Call &call,
+                                   size_t min_nargs,
+                                   size_t max_nargs);
   bool check_arg(const Call &call,
                  Type type,
                  int arg_num,
@@ -99,27 +107,33 @@ private:
 
   void check_stack_call(Call &call, bool kernel);
 
+  Probe *get_probe_from_scope(Scope *scope,
+                              const location &loc,
+                              std::string name = "");
+
   SizedType *get_map_type(const Map &map);
+  MapKey *get_map_key_type(const Map &map);
   void assign_map_type(const Map &map, const SizedType &type);
   void update_key_type(const Map &map, const MapKey &new_key);
   bool update_string_size(SizedType &type, const SizedType &new_type);
   void resolve_struct_type(SizedType &type, const location &loc);
 
   void builtin_args_tracepoint(AttachPoint *attach_point, Builtin &builtin);
-  ProbeType single_provider_type(void);
+  ProbeType single_provider_type(Probe *probe);
   AddrSpace find_addrspace(ProbeType pt);
 
   void binop_ptr(Binop &op);
   void binop_int(Binop &op);
   void binop_array(Binop &op);
 
+  bool has_error() const;
   bool in_loop(void)
   {
     return loop_depth_ > 0;
   };
-  void accept_statements(StatementList *stmts);
+  void accept_statements(StatementList &stmts);
 
-  Probe *probe_;
+  Scope *scope_;
 
   // Holds the function currently being visited by this SemanticAnalyser.
   std::string func_;
@@ -127,7 +141,7 @@ private:
   // SemanticAnalyser.
   int func_arg_idx_ = -1;
 
-  std::map<Probe *, std::map<std::string, SizedType>> variable_val_;
+  std::map<Scope *, std::map<std::string, SizedType>> variable_val_;
   std::map<std::string, SizedType> map_val_;
   std::map<std::string, MapKey> map_key_;
 

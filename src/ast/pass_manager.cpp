@@ -13,7 +13,7 @@ void print(Node *root, const std::string &name, std::ostream &out)
 {
   out << "\nAST after: " << name << std::endl;
   out << "-------------------\n";
-  ast::Printer printer(out, true);
+  ast::Printer printer(out);
   printer.print(root);
   out << std::endl;
 }
@@ -24,24 +24,20 @@ void PassManager::AddPass(Pass p)
   passes_.push_back(std::move(p));
 }
 
-PassResult PassManager::Run(std::unique_ptr<Node> node, PassContext &ctx)
+PassResult PassManager::Run(Node *root, PassContext &ctx)
 {
-  Node *root = node.release();
-  if (bt_debug != DebugLevel::kNone)
+  if (bt_debug.find(DebugStage::Ast) != bt_debug.end())
     print(root, "parser", std::cout);
-  for (auto &pass : passes_)
-  {
+  for (auto &pass : passes_) {
     auto result = pass.Run(*root, ctx);
     if (!result.Ok())
       return result;
 
-    if (result.Root())
-    {
-      delete root;
+    if (result.Root()) {
       root = result.Root();
     }
 
-    if (bt_debug != DebugLevel::kNone)
+    if (bt_debug.find(DebugStage::Ast) != bt_debug.end())
       print(root, pass.name, std::cout);
   }
   return PassResult::Success(root);

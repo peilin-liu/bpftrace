@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 if [[ $EUID -ne 0 ]]; then
     >&2 echo "Must be run as root"
@@ -26,26 +26,40 @@ else
     NC=
 fi
 
+result=0
+
+run_tests () {
+    local -n tests=$1
+    echo "${GREEN}[==========]${NC} Running ${#tests[@]} $3 tests"
+    for tst in "${tests[@]}"; do
+        echo "${GREEN}[ RUN      ]${NC} bpftrace "$2" $tst"
+
+        export ASAN_OPTIONS="alloc_dealloc_mismatch=0"
+        if eval $BPFTRACE_ASAN "$2" "$tst" > /dev/null 2>&1 ; then
+            echo "${GREEN}[       OK ]"
+        else
+            echo "${RED}[  MEMLEAK ]"
+            # re-run the command to output the leak information
+            eval $BPFTRACE_ASAN "$2" "$tst"
+            result=1
+        fi
+    done
+}
+
+
 # Add new testcases here
-tests=(
+program_tests=(
     '"BEGIN { exit(); }"'
     $'"#include <linux/skbuff.h>\n BEGIN { \$x = ((struct sk_buff *)curtask)->data_len; exit(); }"'
-    )
+    '"BEGIN { print((1, 2)); exit(); }"'
+)
 
-echo "${GREEN}[==========]${NC} Running ${#tests[@]} tests"
-
-result=0
-for tst in "${tests[@]}"; do
-    echo "${GREEN}[ RUN      ]${NC} bpftrace -e $tst"
-
-    export ASAN_OPTIONS="alloc_dealloc_mismatch=0"
-    if eval $BPFTRACE_ASAN -e "$tst" > /dev/null 2>&1 ; then
-        echo "${GREEN}[       OK ]"
-    else
-        echo "${RED}[  MEMLEAK ]"
-        result=1
-    fi
-done
+listing_tests=(
+    '"kprobe_seq_*"'
+)
+    
+run_tests program_tests "-e" "program"
+run_tests listing_tests "-l" "listing"
 
 echo "${GREEN}[==========]"
 
@@ -56,4 +70,3 @@ else
 fi
 
 exit $result
-

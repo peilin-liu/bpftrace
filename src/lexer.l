@@ -37,11 +37,13 @@ hspace   [ \t]
 vspace   [\n\r]
 space    {hspace}|{vspace}
 path     :(\\.|[_\-\./a-zA-Z0-9#+\*])+
-builtin  arg[0-9]|args|cgroup|comm|cpid|numaid|cpu|ctx|curtask|elapsed|func|gid|pid|probe|rand|retval|sarg[0-9]|tid|uid|username
-call     avg|buf|cat|cgroupid|clear|count|delete|exit|hist|join|kaddr|kptr|ksym|lhist|macaddr|max|min|ntop|override|print|printf|cgroup_path|reg|signal|stats|str|strerror|strftime|strncmp|strcontains|sum|system|time|uaddr|uptr|usym|zero|path|unwatch|bswap|skboutput|pton|debugf
+builtin  arg[0-9]|args|cgroup|comm|cpid|numaid|cpu|ctx|curtask|elapsed|func|gid|pid|probe|rand|retval|sarg[0-9]|tid|uid|username|jiffies
+call     avg|buf|cat|cgroupid|clear|count|delete|exit|hist|join|kaddr|kptr|ksym|len|lhist|macaddr|max|min|ntop|override|print|printf|cgroup_path|reg|signal|stats|str|strerror|strftime|strncmp|strcontains|sum|system|time|uaddr|uptr|usym|zero|path|unwatch|bswap|skboutput|pton|debugf
 
-simple_type     bool|(u)?int(8|16|32|64)|(u)?(min|max|sum|count|avg|stats)_t|probe_t|username_t|lhist_t|hist_t|usym_t|ksym_t|timestamp_t|macaddr_t|cgroup_path_t|strerror_t
+int_type        bool|(u)?int(8|16|32|64)
+builtin_type    void|(u)?(min|max|sum|count|avg|stats)_t|probe_t|username_t|lhist_t|hist_t|usym_t|ksym_t|timestamp_t|macaddr_t|cgroup_path_t|strerror_t
 sized_type      str_t|inet_t|buf_t
+subprog         fn
 
 /* Don't add to this! Use builtin OR call not both */
 call_and_builtin kstack|ustack|nsecs
@@ -55,6 +57,8 @@ oct_esc  [0-7]{1,3}
 %x ENUM
 %x BRACE
 %x COMMENT
+%x AFTER_COLON
+%x STRUCT_AFTER_COLON
 
 %%
 
@@ -75,6 +79,7 @@ bpftrace|perf|raw       { return Parser::make_STACK_MODE(yytext, loc); }
 {builtin}               { return Parser::make_BUILTIN(yytext, loc); }
 {call}                  { return Parser::make_CALL(yytext, loc); }
 {call_and_builtin}      { return Parser::make_CALL_BUILTIN(yytext, loc); }
+{subprog}               { return Parser::make_SUBPROG(yytext, loc); }
 {int}|{hex}|{exponent}  {
                           try
                           {
@@ -89,7 +94,12 @@ bpftrace|perf|raw       { return Parser::make_STACK_MODE(yytext, loc); }
 {path}                  { return Parser::make_PATH(yytext, loc); }
 {map}                   { return Parser::make_MAP(yytext, loc); }
 {var}                   { return Parser::make_VAR(yytext, loc); }
-":"                     { return Parser::make_COLON(loc); }
+":"                     {
+                          /* For handling "struct x" in "fn name(...): struct x {  }" as a type rather than
+                            a beginning of a struct definition; see AFTER_COLON rules below */
+                          yy_push_state(AFTER_COLON, yyscanner);
+                          return Parser::make_COLON(loc);
+                        }
 ";"                     { return Parser::make_SEMI(loc); }
 "{"                     { return Parser::make_LBRACE(loc); }
 "}"                     { return Parser::make_RBRACE(loc); }
@@ -137,19 +147,21 @@ bpftrace|perf|raw       { return Parser::make_STACK_MODE(yytext, loc); }
 "$"[0-9]+               { return Parser::make_PARAM(yytext, loc); }
 "$"#                    { return Parser::make_PARAMCOUNT(loc); }
 "#"[^!].*               { return Parser::make_CPREPROC(yytext, loc); }
-"if"                    { return Parser::make_IF(loc); }
-"else"                  { return Parser::make_ELSE(loc); }
+"if"                    { return Parser::make_IF(yytext, loc); }
+"else"                  { return Parser::make_ELSE(yytext, loc); }
 "?"                     { return Parser::make_QUES(loc); }
-"unroll"                { return Parser::make_UNROLL(loc); }
-"while"                 { return Parser::make_WHILE(loc); }
-"for"                   { return Parser::make_FOR(loc); }
-"return"                { return Parser::make_RETURN(loc); }
-"continue"              { return Parser::make_CONTINUE(loc); }
-"break"                 { return Parser::make_BREAK(loc); }
-"sizeof"                { return Parser::make_SIZEOF(loc); }
-"offsetof"              { return Parser::make_OFFSETOF(loc); }
+"unroll"                { return Parser::make_UNROLL(yytext, loc); }
+"while"                 { return Parser::make_WHILE(yytext, loc); }
+"config"                { return Parser::make_CONFIG(yytext, loc); }
+"for"                   { return Parser::make_FOR(yytext, loc); }
+"return"                { return Parser::make_RETURN(yytext, loc); }
+"continue"              { return Parser::make_CONTINUE(yytext, loc); }
+"break"                 { return Parser::make_BREAK(yytext, loc); }
+"sizeof"                { return Parser::make_SIZEOF(yytext, loc); }
+"offsetof"              { return Parser::make_OFFSETOF(yytext, loc); }
 
-{simple_type}           { return Parser::make_SIMPLE_TYPE(yytext, loc); }
+{int_type}              { return Parser::make_INT_TYPE(yytext, loc); }
+{builtin_type}          { return Parser::make_BUILTIN_TYPE(yytext, loc); }
 {sized_type}            { return Parser::make_SIZED_TYPE(yytext, loc); }
 
 
@@ -183,6 +195,27 @@ struct|union|enum       {
                             struct_type = yytext;
                             return Parser::make_STRUCT(loc);
                         }
+<AFTER_COLON>{
+  {hspace}+             { loc.step(); }
+  {vspace}+             { loc.lines(yyleng); loc.step(); }
+  struct|union|enum     {
+                          yy_pop_state(yyscanner);
+                          yy_push_state(STRUCT_AFTER_COLON, yyscanner);
+                          buffer.clear();
+                          struct_type = yytext;
+                          return Parser::make_STRUCT(loc);
+                        }
+  .                     { unput(yytext[0]); yy_pop_state(yyscanner); }
+}
+<STRUCT_AFTER_COLON>{
+  "{"|","|")"           {
+                          yy_pop_state(yyscanner);
+                          unput(yytext[0]);
+                          return Parser::make_IDENT(struct_type + " " + trim(buffer), loc);
+                        }
+  .                     { buffer += yytext[0]; }
+  \n                    buffer += '\n'; loc.lines(1); loc.step();
+}
 <STRUCT,BRACE>{
   "*"|")"|","           {
                           if (YY_START == STRUCT)
@@ -191,7 +224,8 @@ struct|union|enum       {
                             // Put the cast type into a canonical form by trimming
                             // and then inserting a single space.
                             yy_pop_state(yyscanner);
-                            unput(yytext[0]);
+                            for (int i = yyleng - 1; i >= 0; i--)
+                              unput(yytext[i]);
                             return Parser::make_IDENT(struct_type + " " + trim(buffer), loc);
                           }
                           buffer += yytext[0];

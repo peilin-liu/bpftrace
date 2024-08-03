@@ -11,6 +11,17 @@
 #include <unistd.h>
 #include <unordered_set>
 
+// Taken from libbpf
+#define BTF_INFO_ENC(kind, kind_flag, vlen)                                    \
+  ((!!(kind_flag) << 31) | ((kind) << 24) | ((vlen)&BTF_MAX_VLEN))
+#define BTF_TYPE_ENC(name, info, size_or_type) (name), (info), (size_or_type)
+#define BTF_INT_ENC(encoding, bits_offset, nr_bits)                            \
+  ((encoding) << 24 | (bits_offset) << 16 | (nr_bits))
+#define BTF_TYPE_INT_ENC(name, encoding, bits_offset, bits, sz)                \
+  BTF_TYPE_ENC(name, BTF_INFO_ENC(BTF_KIND_INT, 0, 0), sz),                    \
+      BTF_INT_ENC(encoding, bits_offset, bits)
+#define BTF_PARAM_ENC(name, type) (name), (type)
+
 struct btf;
 struct btf_type;
 
@@ -18,18 +29,15 @@ namespace bpftrace {
 
 class BPFtrace;
 
-class BTF
-{
-  enum state
-  {
+class BTF {
+  enum state {
     NODATA,
     OK,
   };
 
   // BTF object for vmlinux or a kernel module.
   // We're currently storing its name and BTF id.
-  struct BTFObj
-  {
+  struct BTFObj {
     struct btf* btf;
     __u32 id;
     std::string name;
@@ -37,8 +45,7 @@ class BTF
 
   // It is often necessary to store a BTF id along with the BTF data containing
   // its definition.
-  struct BTFId
-  {
+  struct BTFId {
     struct btf* btf;
     __u32 id;
   };
@@ -67,11 +74,12 @@ public:
   std::map<std::string, std::vector<std::string>> get_params(
       const std::set<std::string>& funcs) const;
 
-  Struct resolve_args(const std::string& func, bool ret);
+  std::optional<Struct> resolve_args(const std::string& func,
+                                     bool ret,
+                                     std::string& err);
   void resolve_fields(SizedType& type);
 
-  std::pair<int, int> get_btf_id_fd(const std::string& func,
-                                    const std::string& mod) const;
+  int get_btf_id(std::string_view func, std::string_view mod) const;
 
 private:
   void load_kernel_btfs(const std::set<std::string>& modules);
@@ -82,7 +90,7 @@ private:
   BTF::BTFId find_id(const std::string& name,
                      std::optional<__u32> kind = std::nullopt) const;
   __s32 find_id_in_btf(struct btf* btf,
-                       const std::string& name,
+                       std::string_view name,
                        std::optional<__u32> = std::nullopt) const;
 
   std::string dump_defs_from_btf(const struct btf* btf,
@@ -94,6 +102,13 @@ private:
   std::set<std::string> get_all_structs_from_btf(const struct btf* btf) const;
   std::unordered_set<std::string> get_all_iters_from_btf(
       const struct btf* btf) const;
+  /*
+   * Similar to btf_type_skip_modifiers this returns the id of the first
+   * type that is not a BTF_KIND_TYPE_TAG while also populating the tags set
+   * with the tag/attribute names from the BTF_KIND_TYPE_TAG types it finds.
+   */
+  __u32 get_type_tags(std::unordered_set<std::string>& tags,
+                      const BTFId& btf_id) const;
 
   __s32 start_id(const struct btf* btf) const;
 

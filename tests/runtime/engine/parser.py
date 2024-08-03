@@ -16,6 +16,10 @@ class UnknownFieldError(Exception):
 class InvalidFieldError(Exception):
     pass
 
+class Expect:
+  def __init__(self, expect, mode):
+    self.expect = expect
+    self.mode = mode
 
 TestStruct = namedtuple(
     'TestStruct',
@@ -23,7 +27,8 @@ TestStruct = namedtuple(
         'name',
         'run',
         'prog',
-        'expect',
+        'expects',
+        'has_exact_expect',
         'timeout',
         'befores',
         'after',
@@ -36,7 +41,9 @@ TestStruct = namedtuple(
         'arch',
         'feature_requirement',
         'neg_feature_requirement',
-        'will_fail'
+        'will_fail',
+        'new_pidns',
+        'skip_if_env_has',
     ],
 )
 
@@ -100,7 +107,8 @@ class TestParser(object):
         name = ''
         run = ''
         prog = ''
-        expect = ''
+        expects = []
+        has_exact_expect = False
         timeout = ''
         befores = []
         after = ''
@@ -113,11 +121,28 @@ class TestParser(object):
         feature_requirement = set()
         neg_feature_requirement = set()
         will_fail = False
+        new_pidns = False
+        skip_if_env_has = None
+        prev_item_name = ''
 
         for item in test:
+            if item[:len(prev_item_name) + 1].isspace():
+                # Whitespace at beginning of line means it continues from the
+                # previous line
+
+                # Remove the leading whitespace and the trailing newline
+                line = item[len(prev_item_name) + 1:-1]
+                if prev_item_name == 'PROG':
+                    prog += '\n' + line
+                    continue
+                elif prev_item_name == 'EXPECT':
+                    expects[-1].expect += '\n' + line
+                    continue
+
             item_split = item.split()
             item_name = item_split[0]
             line = ' '.join(item_split[1:])
+            prev_item_name = item_name
 
             if item_name == 'NAME':
                 name = line
@@ -126,7 +151,19 @@ class TestParser(object):
             elif item_name == "PROG":
                 prog = line
             elif item_name == 'EXPECT':
-                expect = line
+                expects.append(Expect(line, 'text'))
+            elif item_name == 'EXPECT_NONE':
+                expects.append(Expect(line, 'text_none'))
+            elif item_name == 'EXPECT_REGEX':
+                expects.append(Expect(line, 'regex'))
+            elif item_name == 'EXPECT_REGEX_NONE':
+                expects.append(Expect(line, 'regex_none'))
+            elif item_name == 'EXPECT_FILE':
+                has_exact_expect = True
+                expects.append(Expect(line, 'file'))
+            elif item_name == 'EXPECT_JSON':
+                has_exact_expect = True
+                expects.append(Expect(line, 'json'))
             elif item_name == 'TIMEOUT':
                 timeout = int(line.strip(' '))
             elif item_name == 'BEFORE':
@@ -156,16 +193,16 @@ class TestParser(object):
                     "dpath",
                     "uprobe_refcount",
                     "signal",
-                    "iter:task",
-                    "iter:task_file",
-                    "iter:task_vma",
+                    "iter",
                     "libpath_resolv",
                     "dwarf",
                     "aot",
                     "kprobe_multi",
+                    "uprobe_multi",
                     "skboutput",
                     "get_tai_ns",
                     "get_func_ip",
+                    "jiffies64",
                 }
 
                 for f in line.split(" "):
@@ -180,6 +217,11 @@ class TestParser(object):
                     raise UnknownFieldError('%s is invalid for REQUIRES_FEATURE. Suite: %s' % (','.join(unknown), test_suite))
             elif item_name == "WILL_FAIL":
                 will_fail = True
+            elif item_name == "NEW_PIDNS":
+                new_pidns = True
+            elif item_name == "SKIP_IF_ENV_HAS":
+                parts = line.split("=")
+                skip_if_env_has = (parts[0], parts[1])
             else:
                 raise UnknownFieldError('Field %s is unknown. Suite: %s' % (item_name, test_suite))
 
@@ -189,8 +231,10 @@ class TestParser(object):
             raise RequiredFieldError('Test RUN or PROG is required. Suite: ' + test_suite)
         elif run != '' and prog != '':
             raise InvalidFieldError('Test RUN and PROG both specified. Suit: ' + test_suite)
-        elif expect == '':
-            raise RequiredFieldError('Test EXPECT is required. Suite: ' + test_suite)
+        elif len(expects) == 0:
+            raise RequiredFieldError('At leat one test EXPECT (or variation) is required. Suite: ' + test_suite)
+        elif len(expects) > 1 and has_exact_expect:
+            raise InvalidFieldError('EXPECT_JSON or EXPECT_FILE can not be used with other EXPECTs. Suite: ' + test_suite)
         elif timeout == '':
             raise RequiredFieldError('Test TIMEOUT is required. Suite: ' + test_suite)
 
@@ -198,7 +242,8 @@ class TestParser(object):
             name,
             run,
             prog,
-            expect,
+            expects,
+            has_exact_expect,
             timeout,
             befores,
             after,
@@ -211,4 +256,7 @@ class TestParser(object):
             arch,
             feature_requirement,
             neg_feature_requirement,
-            will_fail)
+            will_fail,
+            new_pidns,
+            skip_if_env_has,
+        )

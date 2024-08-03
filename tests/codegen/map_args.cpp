@@ -1,4 +1,4 @@
-#if HAVE_LIBDW
+#ifdef HAVE_LIBLLDB
 
 #include "../dwarf_common.h"
 #include "common.h"
@@ -7,9 +7,7 @@ namespace bpftrace {
 namespace test {
 namespace codegen {
 
-class codegen_dwarf : public test_dwarf
-{
-};
+class codegen_dwarf : public test_dwarf {};
 
 TEST_F(codegen_dwarf, map_args)
 {
@@ -21,4 +19,4 @@ TEST_F(codegen_dwarf, map_args)
 } // namespace test
 } // namespace bpftrace
 
-#endif // HAVE_LIBDW
+#endif // HAVE_LIBLLDB

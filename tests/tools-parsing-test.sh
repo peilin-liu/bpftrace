@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 set -u
 set +e;
@@ -17,7 +17,7 @@ IFS=',' read -ra SKIP_TOOLS <<< "${TOOLS_TEST_DISABLE:-"NONE"}"
 
 function set_tooldir() {
   local dir
-  for dir in "${DIR}/../../tools" "/vagrant/tools"; do
+  for dir in "${DIR}/../../tools"; do
       if [[ -d "$dir" ]]; then
           TOOLDIR="$dir"
           return
@@ -30,11 +30,11 @@ function set_tooldir() {
 
 function do_test() {
   local file="$1"
-  if $BPFTRACE_EXECUTABLE --unsafe -d "$file" 2>/dev/null >/dev/null; then
+  if $BPFTRACE_EXECUTABLE --unsafe -v --dry-run "$file" 2>/dev/null >/dev/null; then
     echo "$file    passed"
   else
     echo "$file    failed";
-    $BPFTRACE_EXECUTABLE --unsafe -d "$file";
+    $BPFTRACE_EXECUTABLE --unsafe -v --dry-run "$file";
     EXIT_STATUS=1;
   fi
 }

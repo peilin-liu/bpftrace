@@ -72,12 +72,24 @@ TEST(required_resources, round_trip_field_sized_type)
   }
 }
 
-TEST(required_resources, round_trip_map_sized_type)
+TEST(required_resources, round_trip_map_info)
 {
   std::ostringstream serialized(std::ios::binary);
   {
+    MapInfo info{
+      .key = MapKey(),
+      .value_type = CreateInet(3),
+      .lhist_args =
+          LinearHistogramArgs{
+              .min = 99,
+              .max = 123,
+              .step = 33,
+          },
+      .hist_bits_arg = 1,
+    };
+    info.key.args_.push_back(CreateInt32());
     RequiredResources r;
-    r.map_vals.insert({ "mymap", CreateInet(3) });
+    r.maps_info.insert({ "mymap", info });
     r.save_state(serialized);
   }
 
@@ -86,37 +98,23 @@ TEST(required_resources, round_trip_map_sized_type)
     RequiredResources r;
     r.load_state(input);
 
-    ASSERT_EQ(r.map_vals.count("mymap"), 1ul);
-    auto &type = r.map_vals["mymap"];
-    EXPECT_TRUE(type.IsInetTy());
-    EXPECT_EQ(type.GetSize(), 3ul);
-  }
-}
+    ASSERT_EQ(r.maps_info.count("mymap"), 1ul);
+    const auto &map_info = r.maps_info["mymap"];
 
-TEST(required_resources, round_trip_map_lhist_args)
-{
-  std::ostringstream serialized(std::ios::binary);
-  {
-    RequiredResources r;
-    r.lhist_args.insert({ "mymap",
-                          LinearHistogramArgs{
-                              .min = 99,
-                              .max = 123,
-                              .step = 33,
-                          } });
-    r.save_state(serialized);
-  }
+    EXPECT_TRUE(map_info.value_type.IsInetTy());
+    EXPECT_EQ(map_info.value_type.GetSize(), 3ul);
 
-  std::istringstream input(serialized.str());
-  {
-    RequiredResources r;
-    r.load_state(input);
+    EXPECT_EQ(map_info.key.args_.size(), 1);
+    EXPECT_TRUE(map_info.key.args_[0].IsIntegerTy());
+    EXPECT_EQ(map_info.key.args_[0].GetSize(), 4);
 
-    ASSERT_EQ(r.lhist_args.count("mymap"), 1ul);
-    auto &args = r.lhist_args["mymap"];
-    EXPECT_EQ(args.min, 99);
-    EXPECT_EQ(args.max, 123);
-    EXPECT_EQ(args.step, 33);
+    EXPECT_TRUE(map_info.lhist_args.has_value());
+    EXPECT_EQ(map_info.lhist_args->min, 99);
+    EXPECT_EQ(map_info.lhist_args->max, 123);
+    EXPECT_EQ(map_info.lhist_args->step, 33);
+
+    EXPECT_TRUE(map_info.hist_bits_arg.has_value());
+    EXPECT_EQ(map_info.hist_bits_arg, 1);
   }
 }
 
@@ -138,8 +136,7 @@ TEST(required_resources, round_trip_set_stack_type)
     r.load_state(input);
 
     ASSERT_EQ(r.stackid_maps.size(), 1ul);
-    for (const auto &st : r.stackid_maps)
-    {
+    for (const auto &st : r.stackid_maps) {
       EXPECT_EQ(st.limit, 33ul);
       EXPECT_EQ(st.mode, StackMode::perf);
     }
@@ -196,8 +193,7 @@ TEST(required_resources, round_trip_multiple_members)
     ASSERT_EQ(r.join_args.size(), 1ul);
     EXPECT_EQ(r.join_args[0], "joinarg0");
     ASSERT_EQ(r.stackid_maps.size(), 1ul);
-    for (const auto &st : r.stackid_maps)
-    {
+    for (const auto &st : r.stackid_maps) {
       EXPECT_EQ(st.limit, 33ul);
       EXPECT_EQ(st.mode, StackMode::perf);
     }

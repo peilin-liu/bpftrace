@@ -1,5 +1,6 @@
 #pragma once
 
+#include <optional>
 #include <ostream>
 #include <sstream>
 #include <vector>
@@ -10,10 +11,9 @@
 namespace bpftrace {
 namespace ast {
 
-class AttachPointParser
-{
+class AttachPointParser {
 public:
-  AttachPointParser(Program *root,
+  AttachPointParser(ASTContext &ctx,
                     BPFtrace &bpftrace,
                     std::ostream &sink,
                     bool listing);
@@ -21,13 +21,7 @@ public:
   int parse();
 
 private:
-  enum State
-  {
-    OK = 0,
-    INVALID,
-    NEW_APS,
-    SKIP
-  };
+  enum State { OK = 0, INVALID, NEW_APS, SKIP };
 
   State parse_attachpoint(AttachPoint &ap);
   /*
@@ -60,10 +54,12 @@ private:
   State iter_parser();
   State raw_tracepoint_parser();
 
+  State argument_count_error(int expected,
+                             std::optional<int> expected2 = std::nullopt);
   std::optional<uint64_t> stoull(const std::string &str);
   std::optional<int64_t> stoll(const std::string &str);
 
-  Program *root_{ nullptr }; // Non-owning pointer
+  ASTContext &ctx_;
   BPFtrace &bpftrace_;
   std::ostream &sink_;
   AttachPoint *ap_{ nullptr }; // Non-owning pointer

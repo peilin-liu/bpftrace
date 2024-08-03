@@ -6,26 +6,29 @@
 #include <sstream>
 
 #include "ast/ast.h"
+#include "struct.h"
 
 namespace bpftrace {
 namespace ast {
 
 void Printer::print(Node *root)
 {
-  depth_ = 0;
+  ++depth_;
   Visit(*root);
+  --depth_;
 }
 
 std::string Printer::type(const SizedType &ty)
 {
+  if (ty.IsNoneTy())
+    return "";
   std::stringstream buf;
-  if (print_types)
-  {
-    buf << " :: type[" << ty << ", ctx: " << ty.IsCtxAccess();
-    if (ty.GetAS() != AddrSpace::none)
-      buf << ", AS(" << ty.GetAS() << ")";
-    buf << "]";
-  }
+  buf << " :: [" << ty;
+  if (ty.IsCtxAccess())
+    buf << ", ctx: 1";
+  if (ty.GetAS() != AddrSpace::none)
+    buf << ", AS(" << ty.GetAS() << ")";
+  buf << "]";
   return buf.str();
 }
 
@@ -56,21 +59,17 @@ void Printer::visit(String &string)
   std::string indent(depth_, ' ');
   std::stringstream ss;
 
-  for (char c: string.str)
-  {
+  for (char c : string.str) {
     // the argument of isprint() must be an unsigned char or EOF
     int code = static_cast<unsigned char>(c);
-    if (std::isprint(code))
-    {
+    if (std::isprint(code)) {
       if (c == '\\')
         ss << "\\\\";
       else if (c == '"')
         ss << "\\\"";
       else
         ss << c;
-    }
-    else
-    {
+    } else {
       if (c == '\n')
         ss << "\\n";
       else if (c == '\t')
@@ -78,8 +77,7 @@ void Printer::visit(String &string)
       else if (c == '\r')
         ss << "\\r";
       else
-        ss << "\\x" << std::setfill('0') << std::setw(2)
-           << std::hex << code;
+        ss << "\\x" << std::setfill('0') << std::setw(2) << std::hex << code;
     }
   }
 
@@ -112,10 +110,8 @@ void Printer::visit(Call &call)
   out_ << indent << "call: " << call.func << type(call.type) << std::endl;
 
   ++depth_;
-  if (call.vargs) {
-    for (Expression *expr : *call.vargs) {
-      expr->accept(*this);
-    }
+  for (Expression *expr : call.vargs) {
+    expr->accept(*this);
   }
   --depth_;
 }
@@ -137,8 +133,16 @@ void Printer::visit(Offsetof &ofof)
   out_ << indent << "offsetof: " << type(ofof.type) << std::endl;
 
   ++depth_;
-  if (ofof.expr)
+  std::string indentParam(depth_, ' ');
+
+  // Print the args
+  if (ofof.expr) {
     ofof.expr->accept(*this);
+  } else {
+    out_ << indentParam << ofof.record << std::endl;
+  }
+
+  out_ << indentParam << ofof.field << std::endl;
   --depth_;
 }
 
@@ -148,10 +152,8 @@ void Printer::visit(Map &map)
   out_ << indent << "map: " << map.ident << type(map.type) << std::endl;
 
   ++depth_;
-  if (map.vargs) {
-    for (Expression *expr : *map.vargs) {
-      expr->accept(*this);
-    }
+  for (Expression *expr : map.vargs) {
+    expr->accept(*this);
   }
   --depth_;
 }
@@ -175,15 +177,12 @@ void Printer::visit(Binop &binop)
 
 void Printer::visit(Unop &unop)
 {
-  if (unop.is_post_op)
-  {
+  if (unop.is_post_op) {
     std::string indent(depth_ + 1, ' ');
 
     unop.expr->accept(*this);
     out_ << indent << opstr(unop) << std::endl;
-  }
-  else
-  {
+  } else {
     std::string indent(depth_, ' ');
     out_ << indent << opstr(unop) << std::endl;
 
@@ -191,7 +190,6 @@ void Printer::visit(Unop &unop)
     unop.expr->accept(*this);
     --depth_;
   }
-
 }
 
 void Printer::visit(Ternary &ternary)
@@ -248,7 +246,7 @@ void Printer::visit(Tuple &tuple)
   out_ << indent << "tuple:" << std::endl;
 
   ++depth_;
-  for (Expression *expr : *tuple.elems)
+  for (Expression *expr : tuple.elems)
     expr->accept(*this);
   --depth_;
 }
@@ -280,6 +278,18 @@ void Printer::visit(AssignVarStatement &assignment)
   --depth_;
 }
 
+void Printer::visit(AssignConfigVarStatement &assignment)
+{
+  std::string indent(depth_, ' ');
+  out_ << indent << "=" << std::endl;
+
+  ++depth_;
+  std::string indentVar(depth_, ' ');
+  out_ << indentVar << "config var: " << assignment.config_var << std::endl;
+  assignment.expr->accept(*this);
+  --depth_;
+}
+
 void Printer::visit(If &if_block)
 {
   std::string indent(depth_, ' ');
@@ -292,13 +302,13 @@ void Printer::visit(If &if_block)
   ++depth_;
   out_ << indent << " then" << std::endl;
 
-  for (Statement *stmt : *if_block.stmts) {
+  for (Statement *stmt : if_block.stmts) {
     stmt->accept(*this);
   }
 
-  if (if_block.else_stmts) {
+  if (!if_block.else_stmts.empty()) {
     out_ << indent << " else" << std::endl;
-    for (Statement *stmt : *if_block.else_stmts) {
+    for (Statement *stmt : if_block.else_stmts) {
       stmt->accept(*this);
     }
   }
@@ -315,7 +325,7 @@ void Printer::visit(Unroll &unroll)
   out_ << indent << " block" << std::endl;
 
   ++depth_;
-  for (Statement *stmt : *unroll.stmts) {
+  for (Statement *stmt : unroll.stmts) {
     stmt->accept(*this);
   }
   depth_ -= 2;
@@ -333,16 +343,60 @@ void Printer::visit(While &while_block)
   ++depth_;
   out_ << indent << " )" << std::endl;
 
-  for (Statement *stmt : *while_block.stmts)
-  {
+  for (Statement *stmt : while_block.stmts) {
     stmt->accept(*this);
   }
+}
+
+void Printer::visit(For &for_loop)
+{
+  std::string indent(depth_, ' ');
+  out_ << indent << "for" << std::endl;
+
+  ++depth_;
+  if (for_loop.ctx_type.IsRecordTy() &&
+      !for_loop.ctx_type.GetFields().empty()) {
+    out_ << indent << " ctx\n";
+    for (const auto &field : for_loop.ctx_type.GetFields()) {
+      out_ << indent << "  " << field.name << type(field.type) << "\n";
+    }
+  }
+
+  out_ << indent << " decl\n";
+  print(for_loop.decl);
+
+  out_ << indent << " expr\n";
+  print(for_loop.expr);
+
+  out_ << indent << " stmts\n";
+  for (Statement *stmt : for_loop.stmts) {
+    print(stmt);
+  }
+  --depth_;
+}
+
+void Printer::visit(Config &config)
+{
+  std::string indent(depth_, ' ');
+
+  out_ << indent << "config" << std::endl;
+
+  ++depth_;
+  for (Statement *stmt : config.stmts) {
+    stmt->accept(*this);
+  }
+  --depth_;
 }
 
 void Printer::visit(Jump &jump)
 {
   std::string indent(depth_, ' ');
   out_ << indent << opstr(jump) << std::endl;
+  if (jump.return_value) {
+    ++depth_;
+    jump.return_value->accept(*this);
+    --depth_;
+  }
 }
 
 void Printer::visit(Predicate &pred)
@@ -358,12 +412,12 @@ void Printer::visit(Predicate &pred)
 void Printer::visit(AttachPoint &ap)
 {
   std::string indent(depth_, ' ');
-  out_ << indent << ap.name(ap.func) << std::endl;
+  out_ << indent << ap.name() << std::endl;
 }
 
 void Printer::visit(Probe &probe)
 {
-  for (AttachPoint *ap : *probe.attach_points) {
+  for (AttachPoint *ap : probe.attach_points) {
     ap->accept(*this);
   }
 
@@ -371,7 +425,28 @@ void Printer::visit(Probe &probe)
   if (probe.pred) {
     probe.pred->accept(*this);
   }
-  for (Statement *stmt : *probe.stmts) {
+  for (Statement *stmt : probe.stmts) {
+    stmt->accept(*this);
+  }
+  --depth_;
+}
+
+void Printer::visit(Subprog &subprog)
+{
+  std::string indent(depth_, ' ');
+  out_ << indent << subprog.name() << ": " << subprog.return_type;
+
+  out_ << "(";
+  for (size_t i = 0; i < subprog.args.size(); i++) {
+    auto &arg = subprog.args.at(i);
+    out_ << arg->name() << " : " << arg->type;
+    if (i < subprog.args.size() - 1)
+      out_ << ", ";
+  }
+  out_ << ")" << std::endl;
+
+  ++depth_;
+  for (Statement *stmt : subprog.stmts) {
     stmt->accept(*this);
   }
   --depth_;
@@ -385,8 +460,16 @@ void Printer::visit(Program &program)
   std::string indent(depth_, ' ');
   out_ << indent << "Program" << std::endl;
 
+  if (program.config) {
+    ++depth_;
+    program.config->accept(*this);
+    --depth_;
+  }
+
   ++depth_;
-  for (Probe *probe : *program.probes)
+  for (Subprog *subprog : program.functions)
+    subprog->accept(*this);
+  for (Probe *probe : program.probes)
     probe->accept(*this);
   --depth_;
 }

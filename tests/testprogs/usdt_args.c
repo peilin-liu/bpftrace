@@ -26,8 +26,7 @@
 #define test_value 0xf7f6f5f4f3f2f1f0
 volatile uint64_t one = 1;
 
-typedef union all_types
-{
+typedef union all_types {
   int8_t i_8;
   uint8_t i_u8;
   uint16_t i_u16;
@@ -83,22 +82,11 @@ typedef union all_types
 #define PROBE_INDEX(sign, size)                                                \
   DTRACE_PROBE1(usdt_args, index_##sign##size, array[i].i_##sign##size)
 
-int main(int argc, char **argv)
+int main()
 {
-  (void)argv;
   volatile all_types_t array[10];
 
-  if (argc > 1)
-  // If we don't have Systemtap headers, we should skip USDT tests. Returning 1
-  // can be used as validation in the REQUIRE
-#ifndef HAVE_SYSTEMTAP_SYS_SDT_H
-    return 1;
-#else
-    return 0;
-#endif
-
-  for (volatile size_t i = 0; i < sizeof(array) / sizeof(array[0]); i++)
-  {
+  for (volatile size_t i = 0; i < sizeof(array) / sizeof(array[0]); i++) {
     array[i].i_u64 = test_value;
   }
 
@@ -135,8 +123,7 @@ int main(int argc, char **argv)
   PROBE_ADDRESS(, 8);
 
   /* Base address + offset + (index * scale) */
-  for (volatile int i = 7; i <= 7; i++)
-  {
+  for (volatile int i = 7; i <= 7; i++) {
     PROBE_INDEX(u, 64);
     PROBE_INDEX(, 64);
     PROBE_INDEX(u, 32);

@@ -12,6 +12,10 @@
 #define BPF_F_KPROBE_MULTI_RETURN (1U << 0)
 #endif
 
+#ifndef BPF_F_UPROBE_MULTI_RETURN
+#define BPF_F_UPROBE_MULTI_RETURN (1U << 0)
+#endif
+
 // clang-format off
 enum bpf_map_type {
 	BPF_MAP_TYPE_UNSPEC,
@@ -126,6 +130,12 @@ enum bpf_attach_type {
 	BPF_SK_REUSEPORT_SELECT_OR_MIGRATE,
 	BPF_PERF_EVENT,
 	BPF_TRACE_KPROBE_MULTI,
+	BPF_LSM_CGROUP,
+	BPF_STRUCT_OPS,
+	BPF_NETFILTER,
+	BPF_TCX_INGRESS,
+	BPF_TCX_EGRESS,
+	BPF_TRACE_UPROBE_MULTI,
 };
 
 #ifdef __BPF_FUNC_MAPPER
@@ -355,4 +365,9 @@ enum bpf_func_id {
 	__BPF_FUNC_MAX_ID,
 };
 #undef __BPF_ENUM_FN
+
+#define BPFTRACE_LIBBPF_OPTS(TYPE, NAME, ...)                                  \
+  _Pragma("GCC diagnostic ignored \"-Wmissing-field-initializers\"")           \
+      LIBBPF_OPTS(TYPE, NAME, __VA_ARGS__)
+
 // clang-format on

@@ -9,8 +9,7 @@ namespace ast {
 
 using callback = std::function<void(Node *)>;
 
-class CallbackVisitor : public Visitor
-{
+class CallbackVisitor : public Visitor {
 public:
   explicit CallbackVisitor(callback func) : func_(func)
   {
@@ -35,6 +34,7 @@ public:
   void visit(ExprStatement &expr) override;
   void visit(AssignMapStatement &assignment) override;
   void visit(AssignVarStatement &assignment) override;
+  void visit(AssignConfigVarStatement &assignment) override;
   void visit(If &if_block) override;
   void visit(Unroll &unroll) override;
   void visit(While &while_block) override;
@@ -42,6 +42,7 @@ public:
   void visit(Predicate &pred) override;
   void visit(AttachPoint &ap) override;
   void visit(Probe &probe) override;
+  void visit(Config &config) override;
   void visit(Program &program) override;
 
 private:

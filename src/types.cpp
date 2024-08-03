@@ -2,10 +2,12 @@
 #include <cassert>
 #include <iostream>
 
+#include "ast/async_event_types.h"
 #include "bpftrace.h"
 #include "log.h"
 #include "struct.h"
 #include "types.h"
+#include "utils.h"
 
 namespace bpftrace {
 
@@ -21,6 +23,7 @@ std::ostream &operator<<(std::ostream &os, AddrSpace as)
   return os;
 }
 
+std::string probetypeName(ProbeType t);
 std::ostream &operator<<(std::ostream &os, ProbeType type)
 {
   os << probetypeName(type);
@@ -29,43 +32,29 @@ std::ostream &operator<<(std::ostream &os, ProbeType type)
 
 std::ostream &operator<<(std::ostream &os, const SizedType &type)
 {
-  if (type.IsRecordTy())
-  {
+  if (type.IsRecordTy()) {
     os << type.GetName();
-  }
-  else if (type.IsPtrTy())
-  {
+  } else if (type.IsPtrTy()) {
     if (type.IsCtxAccess())
       os << "(ctx) ";
     os << *type.GetPointeeTy() << " *";
-  }
-  else if (type.IsIntTy())
-  {
+  } else if (type.IsIntTy()) {
     os << (type.is_signed_ ? "" : "unsigned ") << "int" << 8 * type.GetSize();
-  }
-  else if (type.IsArrayTy())
-  {
+  } else if (type.IsArrayTy()) {
     os << *type.GetElementTy() << "[" << type.GetNumElements() << "]";
-  }
-  else if (type.IsStringTy() || type.IsBufferTy())
-  {
-    os << type.type << "[" << type.GetSize() << "]";
-  }
-  else if (type.IsTupleTy())
-  {
+  } else if (type.IsStringTy() || type.IsBufferTy()) {
+    os << type.GetTy() << "[" << type.GetSize() << "]";
+  } else if (type.IsTupleTy()) {
     os << "(";
     size_t n = type.GetFieldCount();
-    for (size_t i = 0; i < n; ++i)
-    {
+    for (size_t i = 0; i < n; ++i) {
       os << type.GetField(i).type;
       if (i != n - 1)
         os << ",";
     }
     os << ")";
-  }
-  else
-  {
-    os << type.type;
+  } else {
+    os << type.GetTy();
   }
 
   return os;
@@ -73,7 +62,7 @@ std::ostream &operator<<(std::ostream &os, const SizedType &type)
 
 bool SizedType::IsSameType(const SizedType &t) const
 {
-  if (t.type != type)
+  if (t.GetTy() != type_)
     return false;
 
   if (IsRecordTy())
@@ -82,12 +71,12 @@ bool SizedType::IsSameType(const SizedType &t) const
   if (IsPtrTy() && t.IsPtrTy())
     return GetPointeeTy()->IsSameType(*t.GetPointeeTy());
 
-  return type == t.type;
+  return type_ == t.GetTy();
 }
 
 bool SizedType::IsEqual(const SizedType &t) const
 {
-  if (t.type != type)
+  if (t.GetTy() != type_)
     return false;
 
   if (IsRecordTy())
@@ -103,7 +92,7 @@ bool SizedType::IsEqual(const SizedType &t) const
   if (IsTupleTy())
     return *t.GetStruct().lock() == *GetStruct().lock();
 
-  return type == t.type && GetSize() == t.GetSize() &&
+  return type_ == t.GetTy() && GetSize() == t.GetSize() &&
          is_signed_ == t.is_signed_;
 }
 
@@ -119,10 +108,11 @@ bool SizedType::operator==(const SizedType &t) const
 
 bool SizedType::IsByteArray() const
 {
-  return type == Type::string || type == Type::usym || type == Type::ustack ||
-         type == Type::inet || type == Type::buffer ||
-         type == Type::timestamp || type == Type::mac_address ||
-         type == Type::cgroup_path;
+  return type_ == Type::string || type_ == Type::usym ||
+         type_ == Type::kstack || type_ == Type::ustack ||
+         type_ == Type::inet || type_ == Type::buffer ||
+         type_ == Type::timestamp || type_ == Type::mac_address ||
+         type_ == Type::cgroup_path;
 }
 
 bool SizedType::IsAggregate() const
@@ -132,18 +122,20 @@ bool SizedType::IsAggregate() const
 
 bool SizedType::IsStack() const
 {
-  return type == Type::ustack || type == Type::kstack;
+  return type_ == Type::ustack || type_ == Type::kstack;
 }
 
 std::string addrspacestr(AddrSpace as)
 {
-  switch (as)
-  {
+  switch (as) {
     case AddrSpace::kernel:
       return "kernel";
       break;
     case AddrSpace::user:
       return "user";
+      break;
+    case AddrSpace::bpf:
+      return "bpf";
       break;
     case AddrSpace::none:
       return "none";
@@ -155,10 +147,10 @@ std::string addrspacestr(AddrSpace as)
 
 std::string typestr(Type t)
 {
-  switch (t)
-  {
-    // clang-format off
+  switch (t) {
+      // clang-format off
     case Type::none:     return "none";     break;
+    case Type::voidtype: return "void";     break;
     case Type::integer:  return "integer";  break;
     case Type::pointer:  return "pointer";  break;
     case Type::record:   return "record";   break;
@@ -197,14 +189,15 @@ ProbeType probetype(const std::string &probeName)
 {
   ProbeType retType = ProbeType::invalid;
 
-  auto v = std::find_if(PROBE_LIST.begin(), PROBE_LIST.end(),
-                          [&probeName] (const ProbeItem& p) {
-                            return (p.name == probeName ||
-                                   p.abbr == probeName);
-                         });
+  auto v = std::find_if(PROBE_LIST.begin(),
+                        PROBE_LIST.end(),
+                        [&probeName](const ProbeItem &p) {
+                          return (p.name == probeName ||
+                                  p.aliases.find(probeName) != p.aliases.end());
+                        });
 
   if (v != PROBE_LIST.end())
-    retType =  v->type;
+    retType = v->type;
 
   return retType;
 }
@@ -216,7 +209,8 @@ std::string expand_probe_name(const std::string &orig_name)
   auto v = std::find_if(PROBE_LIST.begin(),
                         PROBE_LIST.end(),
                         [&orig_name](const ProbeItem &p) {
-                          return (p.name == orig_name || p.abbr == orig_name);
+                          return (p.name == orig_name ||
+                                  p.aliases.find(orig_name) != p.aliases.end());
                         });
 
   if (v != PROBE_LIST.end())
@@ -254,12 +248,6 @@ std::string probetypeName(ProbeType t)
   return {}; // unreached
 }
 
-bool is_userspace_probe(const ProbeType &probe_type)
-{
-  return probe_type == ProbeType::uprobe ||
-         probe_type == ProbeType::uretprobe || probe_type == ProbeType::usdt;
-}
-
 uint64_t asyncactionint(AsyncAction a)
 {
   return (uint64_t)a;
@@ -268,14 +256,8 @@ uint64_t asyncactionint(AsyncAction a)
 // Type wrappers
 SizedType CreateInteger(size_t bits, bool is_signed)
 {
-  // Zero sized integers are not usually valid. However, during semantic
-  // analysis when we're inferring types, the first pass may not have
-  // enough information to figure out the exact size of the integer. Later
-  // passes infer the exact size.
-  assert(bits == 0 || bits == 1 || bits == 8 || bits == 16 || bits == 32 ||
-         bits == 64);
   auto t = SizedType(Type::integer, 0, is_signed);
-  t.size_bits_ = bits;
+  t.SetIntBitWidth(bits);
   return t;
 }
 
@@ -344,6 +326,11 @@ SizedType CreateNone()
   return SizedType(Type::none, 0);
 }
 
+SizedType CreateVoid()
+{
+  return SizedType(Type::voidtype, 0);
+}
+
 SizedType CreateStackMode()
 {
   return SizedType(Type::stack_mode, 0);
@@ -376,7 +363,8 @@ SizedType CreateRecord(const std::string &name, std::weak_ptr<Struct> record)
 
 SizedType CreateStack(bool kernel, StackType stack)
 {
-  auto st = SizedType(kernel ? Type::kstack : Type::ustack, kernel ? 8 : 16);
+  // These sizes are based on the stack key (see CodegenLLVM::kstack_ustack)
+  auto st = SizedType(kernel ? Type::kstack : Type::ustack, kernel ? 12 : 20);
   st.stack_type = stack;
   return st;
 }
@@ -450,7 +438,8 @@ SizedType CreateKSym()
 
 SizedType CreateBuffer(size_t size)
 {
-  return SizedType(Type::buffer, size);
+  auto metadata_headroom_bytes = sizeof(AsyncEvent::Buf);
+  return SizedType(Type::buffer, size + metadata_headroom_bytes);
 }
 
 SizedType CreateTimestamp()
@@ -502,7 +491,7 @@ Field &SizedType::GetField(ssize_t n) const
 {
   assert(IsTupleTy() || IsRecordTy());
   if (n >= GetFieldCount())
-    throw std::runtime_error("Getfield(): out of bound");
+    throw FatalUserException("Getfield(): out of bounds");
   return inner_struct_.lock()->fields[n];
 }
 
@@ -566,13 +555,11 @@ bool SizedType::FitsInto(const SizedType &t) const
   if (IsStringTy() && t.IsStringTy())
     return GetSize() <= t.GetSize();
 
-  if (IsTupleTy() && t.IsTupleTy())
-  {
+  if (IsTupleTy() && t.IsTupleTy()) {
     if (GetFieldCount() != t.GetFieldCount())
       return false;
 
-    for (ssize_t i = 0; i < GetFieldCount(); i++)
-    {
+    for (ssize_t i = 0; i < GetFieldCount(); i++) {
       if (!GetField(i).type.FitsInto(t.GetField(i).type))
         return false;
     }
@@ -581,17 +568,21 @@ bool SizedType::FitsInto(const SizedType &t) const
   return IsEqual(t);
 }
 
+bool SizedType::NeedsPercpuMap() const
+{
+  return IsHistTy() || IsLhistTy() || IsCountTy() || IsSumTy() || IsMinTy() ||
+         IsMaxTy() || IsAvgTy() || IsStatsTy();
+}
 } // namespace bpftrace
 
 namespace std {
 size_t hash<bpftrace::SizedType>::operator()(
     const bpftrace::SizedType &type) const
 {
-  auto hash = std::hash<unsigned>()(static_cast<unsigned>(type.type));
+  auto hash = std::hash<unsigned>()(static_cast<unsigned>(type.GetTy()));
   bpftrace::hash_combine(hash, type.GetSize());
 
-  switch (type.type)
-  {
+  switch (type.GetTy()) {
     case bpftrace::Type::integer:
       bpftrace::hash_combine(hash, type.IsSigned());
       break;
@@ -615,6 +606,7 @@ size_t hash<bpftrace::SizedType>::operator()(
     // No default case (explicitly skip all remaining types instead) to get
     // a compiler warning when we add a new type
     case bpftrace::Type::none:
+    case bpftrace::Type::voidtype:
     case bpftrace::Type::hist:
     case bpftrace::Type::lhist:
     case bpftrace::Type::count:
