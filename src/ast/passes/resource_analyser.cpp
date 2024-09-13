@@ -1,12 +1,14 @@
 #include "resource_analyser.h"
 
+#include <algorithm>
+
+#include "ast/async_event_types.h"
 #include "bpftrace.h"
 #include "globalvars.h"
 #include "log.h"
 #include "struct.h"
 
-namespace bpftrace {
-namespace ast {
+namespace bpftrace::ast {
 
 namespace {
 
@@ -83,7 +85,12 @@ void ResourceAnalyser::visit(Call &call)
 
   if (call.func == "printf" || call.func == "system" || call.func == "cat" ||
       call.func == "debugf") {
-    std::vector<Field> args;
+    // Implicit first field is the 64bit printf ID.
+    //
+    // Put it in initially so that offset and alignment calculation is
+    // accurate. We'll take it out before saving into resources.
+    std::vector<SizedType> args = { CreateInt64() };
+
     // NOTE: the same logic can be found in the semantic_analyser pass
     for (auto it = call.vargs.begin() + 1; it != call.vargs.end(); it++) {
       // Promote to 64-bit if it's not an aggregate type
@@ -91,13 +98,28 @@ void ResourceAnalyser::visit(Call &call)
       if (!ty.IsAggregate() && !ty.IsTimestampTy())
         ty.SetSize(8);
 
-      args.push_back(Field{
-          .name = "",
-          .type = ty,
-          .offset = 0,
-          .bitfield = std::nullopt,
-      });
+      args.push_back(ty);
     }
+
+    // It may seem odd that we're creating a tuple as part of format
+    // string analysis, but it kinda makes sense. When we transmit
+    // the format string from kernelspace to userspace, we are basically
+    // creating a tuple. Namely: a bunch of values without names, back to
+    // back, and with struct alignment rules.
+    //
+    // Thus, we are good to reuse the padding logic present in tuple
+    // creation to generate offsets for each argument in the args "tuple".
+    auto tuple = Struct::CreateTuple(args);
+
+    // Remove implicit printf ID field. Downstream consumers do not
+    // expect it nor do they care about it.
+    tuple->fields.erase(tuple->fields.begin());
+
+    // Keep track of max "tuple" size needed for fmt string args. Codegen
+    // will use this information to create a percpu array map of large
+    // enough size for all fmt string calls to use.
+    resources_.max_fmtstring_args_size = std::max(
+        resources_.max_fmtstring_args_size, static_cast<uint64_t>(tuple->size));
 
     auto fmtstr = get_literal_string(*call.vargs.at(0));
     if (call.func == "printf") {
@@ -105,14 +127,14 @@ void ResourceAnalyser::visit(Call &call)
           single_provider_type_postsema(probe_) == ProbeType::iter) {
         resources_.bpf_print_fmts.push_back(fmtstr);
       } else {
-        resources_.printf_args.emplace_back(fmtstr, args);
+        resources_.printf_args.emplace_back(fmtstr, tuple->fields);
       }
     } else if (call.func == "debugf") {
       resources_.bpf_print_fmts.push_back(fmtstr);
     } else if (call.func == "system") {
-      resources_.system_args.emplace_back(fmtstr, args);
+      resources_.system_args.emplace_back(fmtstr, tuple->fields);
     } else {
-      resources_.cat_args.emplace_back(fmtstr, args);
+      resources_.cat_args.emplace_back(fmtstr, tuple->fields);
     }
   } else if (call.func == "join") {
     auto delim = call.vargs.size() > 1 ? get_literal_string(*call.vargs.at(1))
@@ -121,7 +143,8 @@ void ResourceAnalyser::visit(Call &call)
     resources_.needs_join_map = true;
   } else if (call.func == "count" || call.func == "sum" || call.func == "min" ||
              call.func == "max" || call.func == "avg") {
-    resources_.needed_global_vars.insert(bpftrace::globalvars::NUM_CPUS);
+    resources_.needed_global_vars.insert(
+        std::string(bpftrace::globalvars::NUM_CPUS));
   } else if (call.func == "hist") {
     auto &map_info = resources_.maps_info[call.map->ident];
     int bits = static_cast<Integer *>(call.vargs.at(1))->n;
@@ -164,13 +187,21 @@ void ResourceAnalyser::visit(Call &call)
   } else if (call.func == "strftime") {
     resources_.strftime_args.push_back(get_literal_string(*call.vargs.at(0)));
   } else if (call.func == "print") {
+    constexpr auto nonmap_headroom = sizeof(AsyncEvent::PrintNonMap);
     auto &arg = *call.vargs.at(0);
-    if (!arg.is_map)
+    if (!arg.is_map) {
       resources_.non_map_print_args.push_back(arg.type);
-    else {
+      resources_.max_fmtstring_args_size = std::max(
+          resources_.max_fmtstring_args_size,
+          nonmap_headroom + arg.type.GetSize());
+    } else {
       auto &map = static_cast<Map &>(arg);
-      if (map.vargs.size() > 0)
+      if (map.vargs.size() > 0) {
         resources_.non_map_print_args.push_back(map.type);
+        resources_.max_fmtstring_args_size = std::max(
+            resources_.max_fmtstring_args_size,
+            nonmap_headroom + map.type.GetSize());
+      }
     }
   } else if (call.func == "kstack" || call.func == "ustack") {
     resources_.stackid_maps.insert(call.type.stack_type);
@@ -217,6 +248,18 @@ void ResourceAnalyser::visit(Map &map)
   map_info.key = map.key_type;
 }
 
+void ResourceAnalyser::visit(Ternary &ternary)
+{
+  Visitor::visit(ternary);
+
+  // Codegen cannot use a phi node for ternary string b/c strings can be of
+  // differing lengths and phi node wants identical types. So we have to
+  // allocate a result temporary, but not on the stack b/c a big string would
+  // blow it up. So we need a scratch buffer for it.
+  if (ternary.type.IsStringTy())
+    resources_.str_buffers++;
+}
+
 bool ResourceAnalyser::uses_usym_table(const std::string &fun)
 {
   return fun == "usym" || fun == "func" || fun == "ustack";
@@ -238,5 +281,4 @@ Pass CreateResourcePass()
   return Pass("ResourceAnalyser", fn);
 }
 
-} // namespace ast
-} // namespace bpftrace
+} // namespace bpftrace::ast

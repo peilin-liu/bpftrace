@@ -5,8 +5,7 @@
 #include "ast/visitors.h"
 #include "log.h"
 
-namespace bpftrace {
-namespace ast {
+namespace bpftrace::ast {
 
 #define MAKE_ACCEPT(Ty)                                                        \
   void Ty::accept(VisitorBase &v)                                              \
@@ -51,7 +50,8 @@ MAKE_ACCEPT(Program)
 
 #undef MAKE_ACCEPT
 
-Integer::Integer(int64_t n, location loc) : Expression(loc), n(n)
+Integer::Integer(int64_t n, location loc, bool is_negative)
+    : Expression(loc), n(n), is_negative(is_negative)
 {
   is_literal = true;
 }
@@ -354,9 +354,13 @@ std::string opstr(const Unop &unop)
     case Operator::MUL:
       return "dereference";
     case Operator::INCREMENT:
-      return "++";
+      if (unop.is_post_op)
+        return "++ (post)";
+      return "++ (pre)";
     case Operator::DECREMENT:
-      return "--";
+      if (unop.is_post_op)
+        return "-- (post)";
+      return "-- (pre)";
     default:
       return {};
   }
@@ -498,5 +502,4 @@ SizedType ident_to_record(const std::string &ident, int pointer_level)
   return result;
 }
 
-} // namespace ast
-} // namespace bpftrace
+} // namespace bpftrace::ast

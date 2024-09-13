@@ -11,14 +11,15 @@
 #include <glob.h>
 #include <iomanip>
 #include <iostream>
+#include <ranges>
 #include <regex>
 #include <sstream>
 #include <sys/epoll.h>
 
 #include <bcc/bcc_elf.h>
+#include <csignal>
 #include <elf.h>
 #include <fcntl.h>
-#include <signal.h>
 #include <sys/personality.h>
 #include <sys/prctl.h>
 #include <sys/stat.h>
@@ -306,7 +307,7 @@ void perf_event_printer(void *cb_cookie, void *data, int size)
     char timestr[64]; // not respecting config_.get(ConfigKeyInt::max_strlen)
     time_t t;
     struct tm tmp;
-    t = time(NULL);
+    t = time(nullptr);
     if (!localtime_r(&t, &tmp)) {
       LOG(WARNING) << "localtime_r: " << strerror(errno);
       return;
@@ -320,7 +321,7 @@ void perf_event_printer(void *cb_cookie, void *data, int size)
     bpftrace->out_->message(MessageType::time, timestr, false);
     return;
   } else if (printf_id == asyncactionint(AsyncAction::join)) {
-    uint64_t join_id = (uint64_t) * (static_cast<uint64_t *>(data) + 1);
+    uint64_t join_id = *(static_cast<uint64_t *>(data) + 1);
     auto delim = bpftrace->resources.join_args[join_id].c_str();
     std::stringstream joined;
     for (unsigned int i = 0; i < bpftrace->join_argnum_; i++) {
@@ -820,11 +821,10 @@ int BPFtrace::run_special_probe(std::string name,
                                 BpfBytecode &bytecode,
                                 trigger_fn_t trigger)
 {
-  for (auto probe = resources.special_probes.rbegin();
-       probe != resources.special_probes.rend();
-       ++probe) {
-    if ((*probe).attach_point == name) {
-      auto aps = attach_probe(*probe, bytecode);
+  for (auto &special_probe :
+       std::ranges::reverse_view(resources.special_probes)) {
+    if (special_probe.attach_point == name) {
+      auto aps = attach_probe(special_probe, bytecode);
       if (aps.size() != 1)
         return -1;
 
@@ -926,6 +926,7 @@ int BPFtrace::run(BpfBytecode bytecode)
 
   bytecode_ = std::move(bytecode);
   bytecode_.set_map_ids(resources);
+  bytecode_.update_global_vars(*this);
 
   try {
     bytecode_.load_progs(resources, *btf_, *feature_, config_);
@@ -981,14 +982,13 @@ int BPFtrace::run(BpfBytecode bytecode)
   // twice: in the first pass iterate forward and attach the probes that will
   // be fired in the same order they were attached, and in the second pass
   // iterate in reverse and attach the rest.
-  for (auto probes = resources.probes.begin(); probes != resources.probes.end();
-       ++probes) {
+  for (auto &probe : resources.probes) {
     if (BPFtrace::exitsig_recv) {
       request_finalize();
       return -1;
     }
-    if (!attach_reverse(*probes)) {
-      auto aps = attach_probe(*probes, bytecode_);
+    if (!attach_reverse(probe)) {
+      auto aps = attach_probe(probe, bytecode_);
 
       if (aps.empty())
         return -1;
@@ -998,15 +998,13 @@ int BPFtrace::run(BpfBytecode bytecode)
     }
   }
 
-  for (auto r_probes = resources.probes.rbegin();
-       r_probes != resources.probes.rend();
-       ++r_probes) {
+  for (auto &probe : std::ranges::reverse_view(resources.probes)) {
     if (BPFtrace::exitsig_recv) {
       request_finalize();
       return -1;
     }
-    if (attach_reverse(*r_probes)) {
-      auto aps = attach_probe(*r_probes, bytecode_);
+    if (attach_reverse(probe)) {
+      auto aps = attach_probe(probe, bytecode_);
 
       if (aps.empty())
         return -1;
@@ -1014,6 +1012,11 @@ int BPFtrace::run(BpfBytecode bytecode)
       for (auto &ap : aps)
         attached_probes_.emplace_back(std::move(ap));
     }
+  }
+
+  if (dry_run) {
+    request_finalize();
+    return 0;
   }
 
   // Kick the child to execute the command.
@@ -1039,9 +1042,6 @@ int BPFtrace::run(BpfBytecode bytecode)
     LOG(WARNING) << "Failed to send readiness notification, ignoring: "
                  << strerror(-err);
 #endif
-
-  if (dry_run)
-    exitsig_recv = true;
 
   if (has_iter_) {
     int err = run_iter();
@@ -1120,7 +1120,7 @@ int BPFtrace::setup_perf_events()
     struct epoll_event ev = {};
     ev.events = EPOLLIN;
     ev.data.ptr = reader;
-    int reader_fd = perf_reader_fd((perf_reader *)reader);
+    int reader_fd = perf_reader_fd(static_cast<perf_reader *>(reader));
 
     bpf_update_elem(
         bytecode_.getMap(MapType::PerfEvent).fd(), &cpu, &reader_fd, 0);
@@ -1239,7 +1239,7 @@ int BPFtrace::poll_perf_events()
     return ready;
   }
   for (int i = 0; i < ready; i++) {
-    perf_reader_event_read((perf_reader *)events[i].data.ptr);
+    perf_reader_event_read(static_cast<perf_reader *>(events[i].data.ptr));
   }
   return ready;
 }
@@ -1265,6 +1265,9 @@ void BPFtrace::handle_event_loss()
 
 int BPFtrace::print_maps()
 {
+  if (dry_run)
+    return 0;
+
   for (auto &map : bytecode_.maps()) {
     if (!map.second.is_printable())
       continue;
@@ -1482,8 +1485,8 @@ int BPFtrace::print_map_hist(const BpfMap &map, uint32_t top, uint32_t div)
   std::vector<std::pair<std::vector<uint8_t>, uint64_t>> total_counts_by_key;
   for (auto &map_elem : values_by_key) {
     int64_t sum = 0;
-    for (size_t i = 0; i < map_elem.second.size(); i++) {
-      sum += map_elem.second.at(i);
+    for (unsigned long i : map_elem.second) {
+      sum += i;
     }
     total_counts_by_key.push_back({ map_elem.first, sum });
   }
@@ -1690,7 +1693,7 @@ std::string BPFtrace::resolve_ksym(uint64_t addr, bool show_offset)
     if (show_offset)
       symbol << "+" << ksym.offset;
   } else {
-    symbol << (void *)addr;
+    symbol << reinterpret_cast<void *>(addr);
   }
 
   return symbol.str();
@@ -1733,7 +1736,7 @@ static int sym_resolve_callback(const char *name,
                                 uint64_t size,
                                 void *payload)
 {
-  struct symbol *sym = (struct symbol *)payload;
+  struct symbol *sym = static_cast<struct symbol *>(payload);
   if (!strcmp(name, sym->name.c_str())) {
     sym->address = addr;
     sym->size = size;
@@ -1788,7 +1791,7 @@ std::string BPFtrace::resolve_cgroup_path(uint64_t cgroup_path_id,
 uint64_t BPFtrace::read_address_from_output(std::string output)
 {
   std::string first_word = output.substr(0, output.find(" "));
-  return std::stoull(first_word, 0, 16);
+  return std::stoull(first_word, nullptr, 16);
 }
 
 static std::string resolve_inetv4(const uint8_t *inet)
@@ -1907,7 +1910,7 @@ std::string BPFtrace::resolve_usym(uint64_t addr,
     if (show_module)
       symbol << " (" << usym.module << ")";
   } else {
-    symbol << (void *)addr;
+    symbol << reinterpret_cast<void *>(addr);
     if (show_module)
       symbol << " ([unknown])";
   }
@@ -1962,12 +1965,15 @@ void BPFtrace::sort_by_key(
       }
 
     } else if (arg.IsStringTy()) {
-      std::stable_sort(
-          values_by_key.begin(), values_by_key.end(), [&](auto &a, auto &b) {
-            return strncmp((const char *)(a.first.data() + arg_offset),
-                           (const char *)(b.first.data() + arg_offset),
-                           arg.GetSize()) < 0;
-          });
+      std::stable_sort(values_by_key.begin(),
+                       values_by_key.end(),
+                       [&](auto &a, auto &b) {
+                         return strncmp(reinterpret_cast<const char *>(
+                                            a.first.data() + arg_offset),
+                                        reinterpret_cast<const char *>(
+                                            b.first.data() + arg_offset),
+                                        arg.GetSize()) < 0;
+                       });
     }
 
     // Other types don't get sorted
@@ -2013,10 +2019,10 @@ std::optional<int64_t> BPFtrace::get_int_literal(
         if (std::holds_alternative<int64_t>(*param_int)) {
           return std::get<int64_t>(*param_int);
         } else {
-          return (int64_t)std::get<uint64_t>(*param_int);
+          return static_cast<int64_t>(std::get<uint64_t>(*param_int));
         }
       } else
-        return (int64_t)num_params();
+        return static_cast<int64_t>(num_params());
     }
   }
 
@@ -2074,7 +2080,7 @@ Dwarf *BPFtrace::get_dwarf(const ast::AttachPoint &attachpoint)
   return get_dwarf(attachpoint.target);
 }
 
-int BPFtrace::create_pcaps(void)
+int BPFtrace::create_pcaps()
 {
   for (auto arg : resources.skboutput_args_) {
     auto file = std::get<0>(arg);
@@ -2094,7 +2100,7 @@ int BPFtrace::create_pcaps(void)
   return 0;
 }
 
-void BPFtrace::close_pcaps(void)
+void BPFtrace::close_pcaps()
 {
   for (auto &writer : pcap_writers) {
     writer.second->close();

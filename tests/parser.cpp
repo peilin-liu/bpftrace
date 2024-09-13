@@ -1,13 +1,11 @@
-#include <limits.h>
+#include <climits>
 #include <sstream>
 
 #include "ast/passes/printer.h"
 #include "driver.h"
 #include "gtest/gtest.h"
 
-namespace bpftrace {
-namespace test {
-namespace parser {
+namespace bpftrace::test::parser {
 
 using Printer = ast::Printer;
 
@@ -771,22 +769,22 @@ TEST(Parser, variable_post_increment_decrement)
   test("kprobe:sys_open { $x++; }",
        "Program\n"
        " kprobe:sys_open\n"
-       "  variable: $x\n"
-       "   ++\n");
+       "  ++ (post)\n"
+       "   variable: $x\n");
   test("kprobe:sys_open { ++$x; }",
        "Program\n"
        " kprobe:sys_open\n"
-       "  ++\n"
+       "  ++ (pre)\n"
        "   variable: $x\n");
   test("kprobe:sys_open { $x--; }",
        "Program\n"
        " kprobe:sys_open\n"
-       "  variable: $x\n"
-       "   --\n");
+       "  -- (post)\n"
+       "   variable: $x\n");
   test("kprobe:sys_open { --$x; }",
        "Program\n"
        " kprobe:sys_open\n"
-       "  --\n"
+       "  -- (pre)\n"
        "   variable: $x\n");
 }
 
@@ -795,22 +793,22 @@ TEST(Parser, map_increment_decrement)
   test("kprobe:sys_open { @x++; }",
        "Program\n"
        " kprobe:sys_open\n"
-       "  map: @x\n"
-       "   ++\n");
+       "  ++ (post)\n"
+       "   map: @x\n");
   test("kprobe:sys_open { ++@x; }",
        "Program\n"
        " kprobe:sys_open\n"
-       "  ++\n"
+       "  ++ (pre)\n"
        "   map: @x\n");
   test("kprobe:sys_open { @x--; }",
        "Program\n"
        " kprobe:sys_open\n"
-       "  map: @x\n"
-       "   --\n");
+       "  -- (post)\n"
+       "   map: @x\n");
   test("kprobe:sys_open { --@x; }",
        "Program\n"
        " kprobe:sys_open\n"
-       "  --\n"
+       "  -- (pre)\n"
        "   map: @x\n");
 }
 
@@ -1059,7 +1057,7 @@ TEST(Parser, unroll)
 
 TEST(Parser, ternary_str)
 {
-  test("kprobe:sys_open { @x = pid < 10000 ? \"lo\" : \"high\" }",
+  test(R"(kprobe:sys_open { @x = pid < 10000 ? "lo" : "high" })",
        "Program\n"
        " kprobe:sys_open\n"
        "  =\n"
@@ -1236,7 +1234,7 @@ TEST(Parser, usdt)
   // Without the escapes needed for C++ to compile:
   //    usdt:/my/program:"\"probe\"" { 1; }
   //
-  test("usdt:/my/program:\"\\\"probe\\\"\" { 1; }",
+  test(R"(usdt:/my/program:"\"probe\"" { 1; })",
        "Program\n"
        " usdt:/my/program:\"probe\"\n"
        "  int: 1\n");
@@ -2370,8 +2368,8 @@ TEST(Parser, while_loop)
     variable: $a
     int: 10
    )
-    variable: $a
-     ++
+    ++ (post)
+     variable: $a
 )PROG");
 }
 
@@ -2409,7 +2407,7 @@ i:s:1 { ((1, 0), 3).0 = (0, 1) }
         ~~~~~~~~~~~~~~~~~~~~~~
 )");
 
-  test_parse_failure("i:s:1 { (1, \"two\", (3, 4)).5 = \"six\"; }", R"(
+  test_parse_failure(R"(i:s:1 { (1, "two", (3, 4)).5 = "six"; })", R"(
 stdin:1:9-37: ERROR: Tuples are immutable once created. Consider creating a new tuple and assigning it instead.
 i:s:1 { (1, "two", (3, 4)).5 = "six"; }
         ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -2628,14 +2626,14 @@ TEST(Parser, subprog_one_arg)
 {
   test("fn f($a : uint8): void {}",
        "Program\n"
-       " f: void($a : unsigned int8)\n");
+       " f: void($a : uint8)\n");
 }
 
 TEST(Parser, subprog_two_args)
 {
   test("fn f($a : uint8, $b : uint8): void {}",
        "Program\n"
-       " f: void($a : unsigned int8, $b : unsigned int8)\n");
+       " f: void($a : uint8, $b : uint8)\n");
 }
 
 TEST(Parser, subprog_string_arg)
@@ -2746,6 +2744,4 @@ BEGIN { for (@kv : @map) { } }
 )");
 }
 
-} // namespace parser
-} // namespace test
-} // namespace bpftrace
+} // namespace bpftrace::test::parser

@@ -12,11 +12,6 @@
 #include "bpftrace.h"
 #include "types.h"
 
-#define CREATE_MEMCPY(dst, src, size, algn)                                    \
-  CreateMemCpy((dst), MaybeAlign(algn), (src), MaybeAlign(algn), (size))
-#define CREATE_MEMCPY_VOLATILE(dst, src, size, algn)                           \
-  CreateMemCpy((dst), MaybeAlign(algn), (src), MaybeAlign(algn), (size), true)
-
 #define CREATE_ATOMIC_RMW(op, ptr, val, align, order)                          \
   CreateAtomicRMW((op), (ptr), (val), MaybeAlign((align)), (order))
 
@@ -43,14 +38,9 @@ public:
                               const std::string &name = "");
   AllocaInst *CreateAllocaBPFInit(const SizedType &stype,
                                   const std::string &name);
-  AllocaInst *CreateAllocaBPF(llvm::Type *ty,
-                              llvm::Value *arraysize,
-                              const std::string &name = "");
-  AllocaInst *CreateAllocaBPF(const SizedType &stype,
-                              llvm::Value *arraysize,
-                              const std::string &name = "");
   AllocaInst *CreateAllocaBPF(int bytes, const std::string &name = "");
   void CreateMemsetBPF(Value *ptr, Value *val, uint32_t size);
+  void CreateMemcpyBPF(Value *dst, Value *src, uint32_t size);
   llvm::Type *GetType(const SizedType &stype);
   llvm::Type *GetMapValueType(const SizedType &stype);
   llvm::ConstantInt *GetIntSameSize(uint64_t C, llvm::Value *expr);
@@ -178,6 +168,8 @@ public:
   CallInst *CreateGetStrScratchMap(int idx,
                                    BasicBlock *failure_callback,
                                    const location &loc);
+  CallInst *CreateGetFmtStringArgsScratchMap(BasicBlock *failure_callback,
+                                             const location &loc);
   void CreateCheckSetRecursion(const location &loc, int early_exit_ret);
   void CreateUnSetRecursion(const location &loc);
   CallInst *CreateHelperCall(libbpf::bpf_func_id func_id,
@@ -240,7 +232,11 @@ public:
                             Value *len,
                             AllocaInst *data,
                             size_t size);
-  void CreatePath(Value *ctx, Value *buf, Value *path, const location &loc);
+  void CreatePath(Value *ctx,
+                  Value *buf,
+                  Value *path,
+                  Value *sz,
+                  const location &loc);
   void CreateSeqPrintf(Value *ctx,
                        Value *fmt,
                        Value *fmt_size,

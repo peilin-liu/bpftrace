@@ -1,5 +1,5 @@
 {
-  description = "High-level tracing language for Linux eBPF";
+  description = "High-level tracing language for Linux";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/release-24.05";
@@ -21,6 +21,9 @@
     flake-utils.lib.eachSystem [ "x86_64-linux" "aarch64-linux" ]
       (system:
         let
+          # The default LLVM version is the latest supported release
+          defaultLlvmVersion = 18;
+
           # Overlay to specify build should use the specific libbpf we want
           libbpfVersion = "1.4.2";
           libbpfOverlay =
@@ -64,11 +67,13 @@
             });
 
           # We need to use two overlays so that bcc inherits the our pinned libbpf
-          pkgs = import nixpkgs { inherit system; overlays = [ libbpfOverlay bccOverlay ]; };
+          overlayedPkgs = import nixpkgs { inherit system; overlays = [ libbpfOverlay bccOverlay ]; };
 
-          # Define lambda that returns a derivation for bpftrace given llvm package as input
+          pkgs = import nixpkgs { inherit system; };
+
+          # Define lambda that returns a derivation for bpftrace given llvm version as input
           mkBpftrace =
-            llvmPackages:
+            llvmVersion:
               with pkgs;
               pkgs.stdenv.mkDerivation rec {
                 name = "bpftrace";
@@ -77,27 +82,26 @@
 
                 nativeBuildInputs = [ cmake ninja bison flex gcc clang ];
 
-                buildInputs = with llvmPackages;
-                  [
-                    asciidoctor
-                    bcc
-                    cereal
-                    elfutils
-                    gtest
-                    libbpf
-                    libbfd
-                    libclang
-                    libelf
-                    libffi
-                    libopcodes
-                    libpcap
-                    libsystemtap
-                    lldb
-                    llvm
-                    pahole
-                    xxd
-                    zlib
-                  ];
+                buildInputs = [
+                  asciidoctor
+                  cereal
+                  elfutils
+                  gtest
+                  libbfd
+                  libelf
+                  libffi
+                  libopcodes
+                  libpcap
+                  libsystemtap
+                  pkgs."llvmPackages_${toString llvmVersion}".libclang
+                  pkgs."llvmPackages_${toString llvmVersion}".lldb
+                  pkgs."llvmPackages_${toString llvmVersion}".llvm
+                  overlayedPkgs.bcc
+                  overlayedPkgs.libbpf
+                  pahole
+                  xxd
+                  zlib
+                ];
 
                 # Release flags
                 cmakeFlags = [
@@ -115,9 +119,11 @@
             pkg:
               with pkgs;
               pkgs.mkShell {
-                buildInputs = pkg.nativeBuildInputs ++ pkg.buildInputs ++ [
+                buildInputs = [
                   binutils
                   coreutils
+                  # Needed for the nix-aware "wrapped" clang-tidy
+                  clang-tools
                   findutils
                   gawk
                   git
@@ -130,7 +136,12 @@
                   python3
                   strace
                   util-linux
-                ];
+                ] ++ pkg.nativeBuildInputs ++ pkg.buildInputs;
+
+                # Some hardening features (like _FORTIFY_SOURCE) requires building with
+                # optimizations on. That's fine for actual flake build, but for most of the
+                # dev builds we do in nix shell, it just causes warning spew.
+                hardeningDisable = [ "all" ];
               };
         in
         {
@@ -139,16 +150,15 @@
 
           # Define package set
           packages = rec {
-            # Default package is latest supported LLVM release
-            default = bpftrace-llvm18;
+            default = self.packages.${system}."bpftrace-llvm${toString defaultLlvmVersion}";
 
             # Support matrix of llvm versions
-            bpftrace-llvm18 = mkBpftrace pkgs.llvmPackages_18;
-            bpftrace-llvm17 = mkBpftrace pkgs.llvmPackages_17;
-            bpftrace-llvm16 = mkBpftrace pkgs.llvmPackages_16;
-            bpftrace-llvm15 = mkBpftrace pkgs.llvmPackages_15;
-            bpftrace-llvm14 = mkBpftrace pkgs.llvmPackages_14;
-            bpftrace-llvm13 = mkBpftrace pkgs.llvmPackages_13;
+            bpftrace-llvm18 = mkBpftrace 18;
+            bpftrace-llvm17 = mkBpftrace 17;
+            bpftrace-llvm16 = mkBpftrace 16;
+            bpftrace-llvm15 = mkBpftrace 15;
+            bpftrace-llvm14 = mkBpftrace 14;
+            bpftrace-llvm13 = mkBpftrace 13;
 
             # Self-contained static binary with all dependencies
             appimage = nix-appimage.mkappimage.${system} {
@@ -189,7 +199,7 @@
           };
 
           devShells = rec {
-            default = bpftrace-llvm18;
+            default = self.devShells.${system}."bpftrace-llvm${toString defaultLlvmVersion}";
 
             bpftrace-llvm18 = mkBpftraceDevShell self.packages.${system}.bpftrace-llvm18;
             bpftrace-llvm17 = mkBpftraceDevShell self.packages.${system}.bpftrace-llvm17;

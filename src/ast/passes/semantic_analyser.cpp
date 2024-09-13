@@ -20,8 +20,7 @@
 #include "types.h"
 #include "usdt.h"
 
-namespace bpftrace {
-namespace ast {
+namespace bpftrace::ast {
 
 static const std::map<std::string, std::tuple<size_t, bool>> &getIntcasts()
 {
@@ -38,9 +37,61 @@ static const std::map<std::string, std::tuple<size_t, bool>> &getIntcasts()
   return intcasts;
 }
 
+static std::pair<uint64_t, uint64_t> getUIntTypeRange(const SizedType &ty)
+{
+  assert(ty.IsIntegerTy());
+  auto size = ty.GetSize();
+  switch (size) {
+    case 1:
+      return { 0, std::numeric_limits<uint8_t>::max() };
+    case 2:
+      return { 0, std::numeric_limits<uint16_t>::max() };
+    case 4:
+      return { 0, std::numeric_limits<uint32_t>::max() };
+    case 8:
+      return { 0, std::numeric_limits<uint64_t>::max() };
+    default:
+      LOG(BUG) << "Unrecognized int type size: " << size;
+      return { 0, 0 };
+  }
+}
+
+static std::pair<int64_t, int64_t> getIntTypeRange(const SizedType &ty)
+{
+  assert(ty.IsIntegerTy());
+  auto size = ty.GetSize();
+  switch (size) {
+    case 1:
+      return { std::numeric_limits<int8_t>::min(),
+               std::numeric_limits<int8_t>::max() };
+    case 2:
+      return { std::numeric_limits<int16_t>::min(),
+               std::numeric_limits<int16_t>::max() };
+    case 4:
+      return { std::numeric_limits<int32_t>::min(),
+               std::numeric_limits<int32_t>::max() };
+    case 8:
+      return { std::numeric_limits<int64_t>::min(),
+               std::numeric_limits<int64_t>::max() };
+    default:
+      LOG(BUG) << "Unrecognized int type size: " << size;
+      return { 0, 0 };
+  }
+}
+
 void SemanticAnalyser::visit(Integer &integer)
 {
-  integer.type = CreateInt64();
+  if (integer.is_negative) {
+    integer.type = CreateInt64();
+  } else {
+    // Default to signed unless the original value is too large
+    uint64_t val = static_cast<uint64_t>(integer.n);
+    if (val > std::numeric_limits<int32_t>::max()) {
+      integer.type = CreateUInt64();
+    } else {
+      integer.type = CreateInt64();
+    }
+  }
 }
 
 void SemanticAnalyser::visit(PositionalParameter &param)
@@ -63,7 +114,7 @@ void SemanticAnalyser::visit(PositionalParameter &param)
               << "$" << param.n << " used numerically but given \"" << pstr
               << "\". Try using str($" << param.n << ").";
         }
-        if (std::holds_alternative<uint64_t>(*param_int)) {
+        if (param_int && std::holds_alternative<uint64_t>(*param_int)) {
           param.type = CreateUInt64();
         }
         // string allocated in bpf stack. See codegen.
@@ -537,7 +588,7 @@ void SemanticAnalyser::visit(Call &call)
         map.skip_key_validation = true;
     }
 
-    expr.accept(*this);
+    Visit(call.vargs[i]);
   }
 
   if (auto probe = dynamic_cast<Probe *>(scope_)) {
@@ -685,7 +736,33 @@ void SemanticAnalyser::visit(Call &call)
             << call.func << "() expects an integer or a pointer type as first "
             << "argument (" << t << " provided)";
       }
-      call.type = CreateString(bpftrace_.config_.get(ConfigKeyInt::max_strlen));
+
+      auto strlen = bpftrace_.config_.get(ConfigKeyInt::max_strlen);
+
+      if (call.vargs.size() == 2 && check_arg(call, Type::integer, 1, false)) {
+        auto &size_arg = *call.vargs.at(1);
+        if (size_arg.is_literal) {
+          auto &integer = static_cast<Integer &>(size_arg);
+          long value = integer.n;
+          if (value < 0) {
+            if (is_final_pass())
+              LOG(ERROR, call.loc, err_)
+                  << call.func << "cannot use negative length (" << value
+                  << ")";
+          } else if (value > static_cast<int64_t>(strlen)) {
+            if (is_final_pass())
+              LOG(WARNING, call.loc, out_)
+                  << "length param (" << value
+                  << ") is too long and will be shortened to " << strlen
+                  << " bytes (see BPFTRACE_MAX_STRLEN)";
+          } else {
+            strlen = value;
+          }
+        }
+      }
+
+      call.type = CreateString(strlen);
+
       if (has_pos_param_) {
         if (dynamic_cast<PositionalParameter *>(arg))
           call.is_literal = true;
@@ -698,18 +775,6 @@ void SemanticAnalyser::visit(Call &call)
                 << call.func << "() only accepts positional parameters"
                 << " directly or with a single constant offset added";
           }
-        }
-      }
-
-      if (is_final_pass() && call.vargs.size() == 2 &&
-          check_arg(call, Type::integer, 1, false)) {
-        auto &size_arg = *call.vargs.at(1);
-        if (size_arg.is_literal) {
-          auto &integer = static_cast<Integer &>(size_arg);
-          long value = integer.n;
-          if (value < 0)
-            LOG(ERROR, call.loc, err_)
-                << call.func << "cannot use negative length (" << value << ")";
         }
       }
 
@@ -1162,7 +1227,7 @@ void SemanticAnalyser::visit(Call &call)
           << "BPF_FUNC_d_path not available for your kernel version";
     }
 
-    if (check_varargs(call, 1, 1)) {
+    if (check_varargs(call, 1, 2)) {
       // Argument for path can be both record and pointer.
       // It's pointer when it's passed directly from the probe
       // argument, like: path(args.path))
@@ -1177,8 +1242,22 @@ void SemanticAnalyser::visit(Call &call)
             << arg.type.GetTy() << " provided)";
       }
 
-      call.type = SizedType(Type::string,
-                            bpftrace_.config_.get(ConfigKeyInt::max_strlen));
+      auto call_type_size = bpftrace_.config_.get(ConfigKeyInt::max_strlen);
+      if (call.vargs.size() == 2) {
+        if (check_arg(call, Type::integer, 1, true)) {
+          auto size = bpftrace_.get_int_literal(call.vargs.at(1));
+          if (size.has_value()) {
+            if (size < 0)
+              LOG(ERROR, call.loc, err_)
+                  << "Builtin path requires a non-negative size";
+          } else {
+            LOG(ERROR, call.loc, err_) << call.func << ": invalid size value";
+          }
+          call_type_size = size.value();
+        }
+      }
+
+      call.type = SizedType(Type::string, call_type_size);
     }
 
     for (auto *attach_point : probe->attach_points) {
@@ -1327,6 +1406,11 @@ void SemanticAnalyser::visit(Call &call)
         LOG(ERROR, call.loc, err_)
             << "Kernel does not support tai timestamp, please try sw_tai";
       }
+      if (call.type.ts_mode == TimestampMode::sw_tai &&
+          !bpftrace_.delta_taitime_.has_value()) {
+        LOG(ERROR, call.loc, err_) << "Failed to initialize sw_tai in "
+                                      "userspace. This is very unexpected.";
+      }
     }
   } else {
     LOG(ERROR, call.loc, err_) << "Unknown function: '" << call.func << "'";
@@ -1338,7 +1422,7 @@ void SemanticAnalyser::visit(Sizeof &szof)
 {
   szof.type = CreateUInt64();
   if (szof.expr) {
-    szof.expr->accept(*this);
+    Visit(szof.expr);
     szof.argtype = szof.expr->type;
   }
   resolve_struct_type(szof.argtype, szof.loc);
@@ -1348,7 +1432,7 @@ void SemanticAnalyser::visit(Offsetof &ofof)
 {
   ofof.type = CreateUInt64();
   if (ofof.expr) {
-    ofof.expr->accept(*this);
+    Visit(ofof.expr);
     ofof.record = ofof.expr->type;
   }
   resolve_struct_type(ofof.record, ofof.loc);
@@ -1448,8 +1532,8 @@ void SemanticAnalyser::visit(Map &map)
   MapKey key;
 
   for (unsigned int i = 0; i < map.vargs.size(); i++) {
+    Visit(map.vargs.at(i));
     Expression *expr = map.vargs.at(i);
-    expr->accept(*this);
 
     // Insert a cast to 64 bits if needed by injecting
     // a cast into the ast.
@@ -1459,7 +1543,7 @@ void SemanticAnalyser::visit(Map &map)
                                                   : CreateUInt64(),
                                               expr,
                                               map.loc);
-      cast->accept(*this);
+      Visit(cast);
       map.vargs.at(i) = cast;
       expr = cast;
     } else if (expr->type.IsPtrTy() && expr->type.IsCtxAccess()) {
@@ -1517,8 +1601,8 @@ void SemanticAnalyser::visit(Variable &var)
 
 void SemanticAnalyser::visit(ArrayAccess &arr)
 {
-  arr.expr->accept(*this);
-  arr.indexpr->accept(*this);
+  Visit(arr.expr);
+  Visit(arr.indexpr);
 
   SizedType &type = arr.expr->type;
   SizedType &indextype = arr.indexpr->type;
@@ -1541,7 +1625,7 @@ void SemanticAnalyser::visit(ArrayAccess &arr)
         auto index = bpftrace_.get_int_literal(arr.indexpr);
         if (index.has_value()) {
           size_t num = type.GetNumElements();
-          if (num != 0 && (size_t)*index >= num)
+          if (num != 0 && static_cast<size_t>(*index) >= num)
             LOG(ERROR, arr.loc, err_)
                 << "the index " << *index
                 << " is out of bounds for array of size " << num;
@@ -1578,6 +1662,8 @@ void SemanticAnalyser::binop_int(Binop &binop)
 
   auto left = binop.left;
   auto right = binop.right;
+  auto left_literal = bpftrace_.get_int_literal(left);
+  auto right_literal = bpftrace_.get_int_literal(right);
 
   // First check if operand signedness is the same
   if (lsign != rsign) {
@@ -1590,13 +1676,11 @@ void SemanticAnalyser::binop_int(Binop &binop)
     //
     // No warning should be emitted as we know that 10 can be
     // represented as unsigned int
-    if (lsign && !rsign && left->is_literal &&
-        *bpftrace_.get_int_literal(left) >= 0) {
+    if (lsign && !rsign && left_literal && *left_literal >= 0) {
       lsign = false;
     }
     // The reverse (10 < a) should also hold
-    else if (!lsign && rsign && right->is_literal &&
-             *bpftrace_.get_int_literal(right) >= 0) {
+    else if (!lsign && rsign && right_literal && *right_literal >= 0) {
       rsign = false;
     } else {
       switch (binop.op) {
@@ -1633,9 +1717,9 @@ void SemanticAnalyser::binop_int(Binop &binop)
   // in kernel sources
   if (binop.op == Operator::DIV || binop.op == Operator::MOD) {
     // Convert operands to unsigned if possible
-    if (lsign && left->is_literal && *bpftrace_.get_int_literal(left) >= 0)
+    if (lsign && left_literal && *left_literal >= 0)
       lsign = false;
-    if (rsign && right->is_literal && *bpftrace_.get_int_literal(right) >= 0)
+    if (rsign && right_literal && *right_literal >= 0)
       rsign = false;
 
     // If they're still signed, we have to warn
@@ -1659,7 +1743,7 @@ void SemanticAnalyser::binop_int(Binop &binop)
     if (pos_param) {
       auto len = bpftrace_.get_param(pos_param->n, true).length();
       if (!offset || binop.op != Operator::PLUS || offset->n < 0 ||
-          (size_t)offset->n > len) {
+          static_cast<size_t>(offset->n) > len) {
         LOG(ERROR, binop.loc + binop.right->loc, err_)
             << "only addition of a single constant less or equal to the "
             << "length of $" << pos_param->n << " (which is " << len << ")"
@@ -1758,8 +1842,8 @@ void SemanticAnalyser::binop_ptr(Binop &binop)
 
 void SemanticAnalyser::visit(Binop &binop)
 {
-  binop.left->accept(*this);
-  binop.right->accept(*this);
+  Visit(binop.left);
+  Visit(binop.right);
 
   auto &lht = binop.left->type;
   auto &rht = binop.right->type;
@@ -1862,7 +1946,7 @@ void SemanticAnalyser::visit(Unop &unop)
     }
   }
 
-  unop.expr->accept(*this);
+  Visit(unop.expr);
 
   auto valid_ptr_op = false;
   switch (unop.op) {
@@ -1878,6 +1962,8 @@ void SemanticAnalyser::visit(Unop &unop)
   if (is_final_pass()) {
     // Unops are only allowed on ints (e.g. ~$x), dereference only on pointers
     // and context (we allow args->field for backwards compatibility)
+    // References are not allowed, instead they get turned into pointers by
+    // the `dereference_if_needed()` function, during the `Visit()` above.
     if (!type.IsIntegerTy() &&
         !((type.IsPtrTy() || type.IsCtxAccess()) && valid_ptr_op)) {
       LOG(ERROR, unop.loc, err_)
@@ -1930,9 +2016,10 @@ void SemanticAnalyser::visit(Unop &unop)
 
 void SemanticAnalyser::visit(Ternary &ternary)
 {
-  ternary.cond->accept(*this);
-  ternary.left->accept(*this);
-  ternary.right->accept(*this);
+  Visit(ternary.cond);
+  Visit(ternary.left);
+  Visit(ternary.right);
+
   const Type &cond = ternary.cond->type.GetTy();
   const Type &lhs = ternary.left->type.GetTy();
   const Type &rhs = ternary.right->type.GetTy();
@@ -1945,10 +2032,11 @@ void SemanticAnalyser::visit(Ternary &ternary)
     if (cond != Type::integer)
       LOG(ERROR, ternary.loc, err_) << "Invalid condition in ternary: " << cond;
   }
-  if (lhs == Type::string)
-    ternary.type = CreateString(
-        bpftrace_.config_.get(ConfigKeyInt::max_strlen));
-  else if (lhs == Type::integer)
+  if (lhs == Type::string) {
+    auto lsize = ternary.left->type.GetSize();
+    auto rsize = ternary.right->type.GetSize();
+    ternary.type = CreateString(std::max(lsize, rsize));
+  } else if (lhs == Type::integer)
     ternary.type = CreateInteger(64, ternary.left->type.IsSigned());
   else if (lhs == Type::none)
     ternary.type = CreateNone();
@@ -1959,7 +2047,7 @@ void SemanticAnalyser::visit(Ternary &ternary)
 
 void SemanticAnalyser::visit(If &if_block)
 {
-  if_block.cond->accept(*this);
+  Visit(if_block.cond);
 
   if (is_final_pass()) {
     const Type &cond = if_block.cond->type.GetTy();
@@ -1973,7 +2061,7 @@ void SemanticAnalyser::visit(If &if_block)
 
 void SemanticAnalyser::visit(Unroll &unroll)
 {
-  unroll.expr->accept(*this);
+  Visit(unroll.expr);
 
   auto unroll_value = bpftrace_.get_int_literal(unroll.expr);
   if (!unroll_value.has_value()) {
@@ -1996,8 +2084,9 @@ void SemanticAnalyser::visit(Jump &jump)
 {
   switch (jump.ident) {
     case JumpType::RETURN:
-      if (jump.return_value)
-        jump.return_value->accept(*this);
+      if (jump.return_value) {
+        Visit(jump.return_value);
+      }
       if (auto subprog = dynamic_cast<Subprog *>(scope_)) {
         if ((subprog->return_type.IsVoidTy() !=
              (jump.return_value == nullptr)) ||
@@ -2028,7 +2117,7 @@ void SemanticAnalyser::visit(While &while_block)
            " on LLVMs loop unroll to generate loadable code.";
   }
 
-  while_block.cond->accept(*this);
+  Visit(while_block.cond);
 
   loop_depth_++;
   accept_statements(while_block.stmts);
@@ -2158,7 +2247,7 @@ void SemanticAnalyser::visit(For &f)
   }
 
   map.skip_key_validation = true;
-  map.accept(*this);
+  Visit(&map);
 
   if (has_error())
     return;
@@ -2257,7 +2346,7 @@ void SemanticAnalyser::visit(FieldAccess &acc)
   // A field access must have a field XOR index
   assert((acc.field.size() > 0) != (acc.index >= 0));
 
-  acc.expr->accept(*this);
+  Visit(acc.expr);
 
   SizedType &type = acc.expr->type;
 
@@ -2288,7 +2377,11 @@ void SemanticAnalyser::visit(FieldAccess &acc)
       return;
     auto arg = bpftrace_.structs.GetProbeArg(*probe, acc.field);
     if (arg) {
-      acc.type = arg->type;
+      // Only set acc.type if it's not already set. [1]
+      // Overwriting the type once set could override the conversion
+      // from Reference to Pointer done by dereference_if_needed.
+      if (acc.type.IsNoneTy())
+        acc.type = arg->type;
       acc.type.SetAS(acc.expr->type.GetAS());
 
       if (is_final_pass()) {
@@ -2389,7 +2482,10 @@ void SemanticAnalyser::visit(FieldAccess &acc)
         }
       }
 
-      acc.type = field.type;
+      // Only set acc.type if it's not already set. See explanation [1].
+      if (acc.type.IsNoneTy())
+        acc.type = field.type;
+
       if (acc.expr->type.IsCtxAccess() &&
           (acc.type.IsArrayTy() || acc.type.IsRecordTy())) {
         // e.g., ((struct bpf_perf_event_data*)ctx)->regs.ax
@@ -2410,7 +2506,7 @@ void SemanticAnalyser::visit(FieldAccess &acc)
 
 void SemanticAnalyser::visit(Cast &cast)
 {
-  cast.expr->accept(*this);
+  Visit(cast.expr);
 
   // cast type is synthesised in parser, if it is a struct, it needs resolving
   resolve_struct_type(cast.type, cast.loc);
@@ -2488,9 +2584,8 @@ void SemanticAnalyser::visit(Cast &cast)
 void SemanticAnalyser::visit(Tuple &tuple)
 {
   std::vector<SizedType> elements;
-  for (size_t i = 0; i < tuple.elems.size(); ++i) {
-    Expression *elem = tuple.elems.at(i);
-    elem->accept(*this);
+  for (auto &elem : tuple.elems) {
+    Visit(elem);
 
     // If elem type is none that means that the tuple contains some
     // invalid cast (e.g., (0, (aaa)0)). In this case, skip the tuple
@@ -2505,13 +2600,13 @@ void SemanticAnalyser::visit(Tuple &tuple)
 
 void SemanticAnalyser::visit(ExprStatement &expr)
 {
-  expr.expr->accept(*this);
+  Visit(expr.expr);
 }
 
 void SemanticAnalyser::visit(AssignMapStatement &assignment)
 {
-  assignment.map->accept(*this);
-  assignment.expr->accept(*this);
+  Visit(assignment.map);
+  Visit(assignment.expr);
 
   assign_map_type(*assignment.map, assignment.expr->type);
 
@@ -2587,7 +2682,7 @@ void SemanticAnalyser::visit(AssignMapStatement &assignment)
 
 void SemanticAnalyser::visit(AssignVarStatement &assignment)
 {
-  assignment.expr->accept(*this);
+  Visit(assignment.expr);
 
   std::string var_ident = assignment.var->ident;
   auto search = variable_val_[scope_].find(var_ident);
@@ -2610,6 +2705,69 @@ void SemanticAnalyser::visit(AssignVarStatement &assignment)
           << "trying to assign value of type '" << assignTy
           << "' when variable already contains a value of type '"
           << search->second << "'";
+    } else if (search->second.IsIntegerTy()) {
+      if (assignment.expr->is_literal) {
+        auto integer = static_cast<Integer *>(assignment.expr);
+        if (!search->second.IsEqual(assignTy)) {
+          int64_t value = integer->n;
+          bool can_fit = false;
+          if (integer->is_negative) {
+            if (!search->second.IsSigned()) {
+              LOG(ERROR, assignment.loc, err_)
+                  << "Type mismatch for " << var_ident << ": "
+                  << "trying to assign value of type '" << assignTy
+                  << "' when variable already contains a value of type '"
+                  << search->second << "'";
+              return;
+            } else {
+              auto min_max = getIntTypeRange(search->second);
+              can_fit = value >= min_max.first;
+            }
+          } else {
+            if (!search->second.IsSigned()) {
+              auto min_max = getUIntTypeRange(search->second);
+              can_fit = static_cast<uint64_t>(value) <= min_max.second;
+            } else {
+              // Casting to a uint64 here because the assign 'value'
+              // might be larger than the max signed int64 e.g.
+              // `$x = -1; $x = 10223372036854775807;`
+              auto min_max = getIntTypeRange(search->second);
+              can_fit = static_cast<uint64_t>(value) <=
+                        static_cast<uint64_t>(min_max.second);
+            }
+          }
+          if (can_fit) {
+            Expression *cast = ctx_.make_node<Cast>(
+                CreateInteger(search->second.GetSize() * 8,
+                              search->second.IsSigned()),
+                assignment.expr,
+                assignment.loc);
+            Visit(cast);
+            assignment.expr = cast;
+          } else {
+            LOG(ERROR, assignment.loc, err_)
+                << "Type mismatch for " << var_ident << ": "
+                << "trying to assign value '"
+                << (integer->is_negative ? integer->n
+                                         : static_cast<uint64_t>(integer->n))
+                << "' which does not fit into the variable of type '"
+                << search->second << "'";
+          }
+        }
+      } else if (search->second.IsSigned() != assignTy.IsSigned()) {
+        LOG(ERROR, assignment.loc, err_)
+            << "Type mismatch for " << var_ident << ": "
+            << "trying to assign value of type '" << assignTy
+            << "' when variable already contains a value of type '"
+            << search->second << "'";
+      } else {
+        if (!assignTy.FitsInto(search->second)) {
+          LOG(ERROR, assignment.loc, err_)
+              << "Integer size mismatch. Assignment type '" << assignTy
+              << "' is larger than the variable type '" << search->second
+              << "'.";
+        }
+      }
     }
   } else {
     // This variable hasn't been seen before
@@ -2663,17 +2821,33 @@ void SemanticAnalyser::visit(AssignVarStatement &assignment)
     if (ty == Type::none)
       LOG(ERROR, assignment.expr->loc, err_)
           << "Invalid expression for assignment: " << ty;
+
+    // Scratch variables are on the BPF stack, which is only 512 bytes at time
+    // of writing, so large values do not fit on there. 200 is a ballpark of
+    // what probably won't work.
+    auto expr_size = assignTy.GetSize();
+    if (expr_size > 200) {
+      LOG(ERROR, assignment.loc, err_)
+          << "Value is too big "
+          << "(" << expr_size << " bytes) for the stack. "
+          << "Try reducing its size, storing it in a map, or creating it in "
+             "argument position to a helper call.\n\n"
+          << "Examples:\n"
+          << "    `$s = str(..);` => `$s = str(.., 32);`\n"
+          << "    `$s = str(..);` => `@s = str(..);`\n"
+          << "    `$s = str(..); print($s);` => `print(str(..));`\n\n";
+    }
   }
 }
 
 void SemanticAnalyser::visit(AssignConfigVarStatement &assignment)
 {
-  assignment.expr->accept(*this);
+  Visit(assignment.expr);
 }
 
 void SemanticAnalyser::visit(Predicate &pred)
 {
-  pred.expr->accept(*this);
+  Visit(pred.expr);
   if (is_final_pass()) {
     SizedType &ty = pred.expr->type;
     if (!ty.IsIntTy() && !ty.IsPtrTy()) {
@@ -2965,13 +3139,13 @@ void SemanticAnalyser::visit(Probe &probe)
       LOG(ERROR, ap->loc, err_) << "Only single iter attach point is allowed.";
       return;
     }
-    ap->accept(*this);
+    Visit(ap);
   }
   if (probe.pred) {
-    probe.pred->accept(*this);
+    Visit(probe.pred);
   }
   for (Statement *stmt : probe.stmts) {
-    stmt->accept(*this);
+    Visit(stmt);
   }
 }
 
@@ -2992,12 +3166,12 @@ void SemanticAnalyser::visit(Subprog &subprog)
 void SemanticAnalyser::visit(Program &program)
 {
   for (Subprog *subprog : program.functions)
-    subprog->accept(*this);
+    Visit(subprog);
   for (Probe *probe : program.probes)
-    probe->accept(*this);
+    Visit(probe);
 
   if (program.config)
-    program.config->accept(*this);
+    Visit(program.config);
 }
 
 int SemanticAnalyser::analyse()
@@ -3007,7 +3181,7 @@ int SemanticAnalyser::analyse()
 
   int num_passes = listing_ ? 1 : num_passes_;
   for (pass_ = 1; pass_ <= num_passes; pass_++) {
-    ctx_.root->accept(*this);
+    Visit(ctx_.root);
     errors = err_.str();
     if (!errors.empty()) {
       out_ << errors;
@@ -3344,8 +3518,8 @@ void SemanticAnalyser::assign_map_type(const Map &map, const SizedType &type)
 void SemanticAnalyser::accept_statements(StatementList &stmts)
 {
   for (size_t i = 0; i < stmts.size(); i++) {
+    Visit(stmts.at(i));
     auto stmt = stmts.at(i);
-    stmt->accept(*this);
 
     if (is_final_pass()) {
       auto *jump = dynamic_cast<Jump *>(stmt);
@@ -3407,8 +3581,9 @@ bool SemanticAnalyser::update_string_size(SizedType &type,
         updated = true;
       new_elems.push_back(type.GetField(i).type);
     }
-    if (updated)
+    if (updated) {
       type = CreateTuple(bpftrace_.structs.AddTuple(new_elems));
+    }
     return updated;
   }
 
@@ -3455,5 +3630,21 @@ Pass CreateSemanticPass()
   return Pass("Semantic", fn);
 };
 
-} // namespace ast
-} // namespace bpftrace
+void SemanticAnalyser::dereference_if_needed(Expression *&expr)
+{
+  if (expr->type.IsRefTy()) {
+    expr->type.IntoPointer();
+    const SizedType &ptr_type = expr->type;
+    Expression *ptr_expr = expr;
+
+    Unop *deref_expr = new Unop(Operator::MUL, ptr_expr, ptr_expr->loc);
+    deref_expr->type = *ptr_type.GetPointeeTy();
+    deref_expr->type.is_internal = ptr_type.is_internal;
+    deref_expr->type.SetAS(ptr_type.GetAS());
+    if (ptr_type.IsCtxAccess())
+      deref_expr->type.MarkCtxAccess();
+    expr = deref_expr;
+  }
+}
+
+} // namespace bpftrace::ast

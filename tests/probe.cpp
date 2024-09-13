@@ -11,9 +11,7 @@
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
 
-namespace bpftrace {
-namespace test {
-namespace probe {
+namespace bpftrace::test::probe {
 
 #include "btf_common.h"
 
@@ -42,6 +40,8 @@ void gen_bytecode(const std::string &input, std::stringstream &out)
   ast::ResourceAnalyser resource_analyser(driver.ctx.root, *bpftrace);
   auto resources_optional = resource_analyser.analyse();
   ASSERT_TRUE(resources_optional.has_value());
+  // clang-tidy doesn't recognize ASSERT_*() as execution terminating
+  // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
   bpftrace->resources = resources_optional.value();
 
   ast::CodegenLLVM codegen(driver.ctx.root, *bpftrace);
@@ -84,6 +84,4 @@ TEST_F(probe_btf, short_name)
   compare_bytecode("iter:task_vma { 1 }", "it:task_vma { 1 }");
 }
 
-} // namespace probe
-} // namespace test
-} // namespace bpftrace
+} // namespace bpftrace::test::probe

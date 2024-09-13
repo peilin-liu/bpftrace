@@ -19,8 +19,7 @@ def main(test_filter, skiplist_file, run_aot_tests):
     skiplist = set()
     if skiplist_file:
         with open(skiplist_file, 'r') as f:
-            for line in f:
-                skiplist.add(line.strip())
+            skiplist = { line.strip() for line in f if not line.startswith("#") }
 
     try:
         test_suite = sorted(TestParser.read_all(run_aot_tests))
@@ -82,7 +81,7 @@ def main(test_filter, skiplist_file, run_aot_tests):
         for timeouted_test in timeouted_tests:
             print(fail("[  TIMEOUT ]") + " %s" % timeouted_test)
 
-    if failed_tests:
+    if failed_tests or timeouted_tests:
         exit(1)
 
 

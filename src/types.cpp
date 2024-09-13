@@ -38,8 +38,10 @@ std::ostream &operator<<(std::ostream &os, const SizedType &type)
     if (type.IsCtxAccess())
       os << "(ctx) ";
     os << *type.GetPointeeTy() << " *";
+  } else if (type.IsRefTy()) {
+    os << *type.GetDereferencedTy() << " &";
   } else if (type.IsIntTy()) {
-    os << (type.is_signed_ ? "" : "unsigned ") << "int" << 8 * type.GetSize();
+    os << (type.is_signed_ ? "" : "u") << "int" << 8 * type.GetSize();
   } else if (type.IsArrayTy()) {
     os << *type.GetElementTy() << "[" << type.GetNumElements() << "]";
   } else if (type.IsStringTy() || type.IsBufferTy()) {
@@ -153,6 +155,7 @@ std::string typestr(Type t)
     case Type::voidtype: return "void";     break;
     case Type::integer:  return "integer";  break;
     case Type::pointer:  return "pointer";  break;
+    case Type::reference:return "reference";break;
     case Type::record:   return "record";   break;
     case Type::hist:     return "hist";     break;
     case Type::lhist:    return "lhist";    break;
@@ -250,7 +253,7 @@ std::string probetypeName(ProbeType t)
 
 uint64_t asyncactionint(AsyncAction a)
 {
-  return (uint64_t)a;
+  return static_cast<uint64_t>(a);
 }
 
 // Type wrappers
@@ -261,7 +264,7 @@ SizedType CreateInteger(size_t bits, bool is_signed)
   return t;
 }
 
-SizedType CreateBool(void)
+SizedType CreateBool()
 {
   return CreateInteger(1, false);
 }
@@ -349,6 +352,15 @@ SizedType CreatePointer(const SizedType &pointee_type, AddrSpace as)
   // Pointer itself is always an uint64
   auto ty = SizedType(Type::pointer, 8);
   ty.element_type_ = std::make_shared<SizedType>(pointee_type);
+  ty.SetAS(as);
+  return ty;
+}
+
+SizedType CreateReference(const SizedType &referred_type, AddrSpace as)
+{
+  // Reference itself is always an uint64
+  auto ty = SizedType(Type::reference, 8);
+  ty.element_type_ = std::make_shared<SizedType>(referred_type);
   ty.SetAS(as);
   return ty;
 }
@@ -476,7 +488,7 @@ SizedType CreateTimestampMode()
   return SizedType(Type::timestamp_mode, 0);
 }
 
-bool SizedType::IsSigned(void) const
+bool SizedType::IsSigned() const
 {
   return is_signed_;
 }
@@ -547,15 +559,19 @@ std::weak_ptr<const Struct> SizedType::GetStruct() const
   return inner_struct_;
 }
 
-// Checks if values of this type can be copied into values of another type
-// Currently checks if strings in the other type (at corresponding places) are
-// larger.
 bool SizedType::FitsInto(const SizedType &t) const
 {
+  if (!IsSameType(t))
+    return false;
+
   if (IsStringTy() && t.IsStringTy())
     return GetSize() <= t.GetSize();
 
-  if (IsTupleTy() && t.IsTupleTy()) {
+  if (IsIntegerTy()) {
+    return (IsSigned() == t.IsSigned()) && (GetSize() <= t.GetSize());
+  }
+
+  if (IsTupleTy()) {
     if (GetFieldCount() != t.GetFieldCount())
       return false;
 
@@ -588,6 +604,9 @@ size_t hash<bpftrace::SizedType>::operator()(
       break;
     case bpftrace::Type::pointer:
       bpftrace::hash_combine(hash, *type.GetPointeeTy());
+      break;
+    case bpftrace::Type::reference:
+      bpftrace::hash_combine(hash, *type.GetDereferencedTy());
       break;
     case bpftrace::Type::record:
       bpftrace::hash_combine(hash, type.GetName());

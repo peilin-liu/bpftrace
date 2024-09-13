@@ -1,9 +1,9 @@
 #include <algorithm>
 #include <array>
+#include <cerrno>
 #include <climits>
 #include <cmath>
 #include <cstring>
-#include <errno.h>
 #include <fcntl.h>
 #include <fstream>
 #include <gelf.h>
@@ -429,6 +429,29 @@ std::string erase_prefix(std::string &str)
   return prefix;
 }
 
+void erase_parameter_list(std::string &demangled_name)
+{
+  size_t args_start = std::string::npos;
+  ssize_t stack = 0;
+  // Look for the parenthesis closing the parameter list, then find
+  // the matching parenthesis at the start of the parameter list...
+  for (ssize_t it = demangled_name.find_last_of(')'); it >= 0; --it) {
+    if (demangled_name[it] == ')')
+      stack++;
+    if (demangled_name[it] == '(')
+      stack--;
+    if (stack == 0) {
+      args_start = it;
+      break;
+    }
+  }
+
+  // If we found the start of the parameter list,
+  // remove the parameters from the match line.
+  if (args_start != std::string::npos)
+    demangled_name.resize(args_start);
+}
+
 bool wildcard_match(std::string_view str,
                     const std::vector<std::string> &tokens,
                     bool start_wildcard,
@@ -613,7 +636,9 @@ std::vector<std::pair<std::string, std::string>> get_cgroup_hierarchy_roots()
   for (std::string line; std::getline(mounts_file, line);) {
     std::smatch match;
     if (std::regex_match(line, match, cgroup_mount_regex)) {
-      result.push_back({ match[1].str(), match[2].str() });
+      if (std_filesystem::is_directory(match[2].str())) {
+        result.push_back({ match[1].str(), match[2].str() });
+      }
     }
   }
 
@@ -874,7 +899,6 @@ static std::optional<int> is_elf(const std::string &path)
 {
   int fd;
   Elf *elf;
-  void *ret;
   GElf_Ehdr ehdr;
   std::optional<int> result = {};
 
@@ -887,8 +911,8 @@ static std::optional<int> is_elf(const std::string &path)
     return result;
   }
 
-  elf = elf_begin(fd, ELF_C_READ, NULL);
-  if (elf == NULL) {
+  elf = elf_begin(fd, ELF_C_READ, nullptr);
+  if (elf == nullptr) {
     goto err_close;
   }
 
@@ -896,8 +920,7 @@ static std::optional<int> is_elf(const std::string &path)
     goto err_close;
   }
 
-  ret = (void *)gelf_getehdr(elf, &ehdr);
-  if (ret == NULL) {
+  if (!gelf_getehdr(elf, &ehdr)) {
     goto err_end;
   }
 
@@ -1176,13 +1199,17 @@ std::string hex_format_buffer(const char *buf,
   size_t offset = 0;
   for (size_t i = 0; i < size; i++)
     if (keep_ascii && buf[i] >= 32 && buf[i] <= 126)
-      offset += sprintf(s + offset, "%c", ((const uint8_t *)buf)[i]);
+      offset += sprintf(s + offset,
+                        "%c",
+                        (reinterpret_cast<const uint8_t *>(buf))[i]);
     else if (escape_hex)
-      offset += sprintf(s + offset, "\\x%02x", ((const uint8_t *)buf)[i]);
+      offset += sprintf(s + offset,
+                        "\\x%02x",
+                        (reinterpret_cast<const uint8_t *>(buf))[i]);
     else
       offset += sprintf(s + offset,
                         i == size - 1 ? "%02x" : "%02x ",
-                        ((const uint8_t *)buf)[i]);
+                        (reinterpret_cast<const uint8_t *>(buf))[i]);
 
   // Fit return value to actual length
   str.resize(offset);
@@ -1305,7 +1332,7 @@ static uint32_t _find_version_note(unsigned long base)
   return 0;
 }
 
-static uint32_t kernel_version_from_vdso(void)
+static uint32_t kernel_version_from_vdso()
 {
   // Fetch LINUX_VERSION_CODE from the vDSO .note section, falling back on
   // the build-time constant if unavailable. This always matches the
@@ -1319,7 +1346,7 @@ static uint32_t kernel_version_from_vdso(void)
   return code;
 }
 
-static uint32_t kernel_version_from_uts(void)
+static uint32_t kernel_version_from_uts()
 {
   struct utsname utsname;
   if (uname(&utsname) < 0)
@@ -1330,14 +1357,14 @@ static uint32_t kernel_version_from_uts(void)
   return KERNEL_VERSION(x, y, z);
 }
 
-static uint32_t kernel_version_from_khdr(void)
+static uint32_t kernel_version_from_khdr()
 {
   // Try to get the definition of LINUX_VERSION_CODE at runtime.
   std::ifstream linux_version_header{ "/usr/include/linux/version.h" };
   const std::string content{ std::istreambuf_iterator<char>(
                                  linux_version_header),
                              std::istreambuf_iterator<char>() };
-  const std::regex regex{ "#define\\s+LINUX_VERSION_CODE\\s+(\\d+)" };
+  const std::regex regex{ R"(#define\s+LINUX_VERSION_CODE\s+(\d+))" };
   std::smatch match;
 
   if (std::regex_search(content.begin(), content.end(), match, regex))

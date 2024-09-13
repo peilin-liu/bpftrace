@@ -78,7 +78,7 @@ public:
   void DumpIR(const std::string filename);
   void createFormatStringCall(Call &call,
                               int id,
-                              CallArgs &call_args,
+                              const CallArgs &call_args,
                               const std::string &call_name,
                               AsyncAction async_action);
 
@@ -94,6 +94,10 @@ public:
       const SizedType &tuple_type,
       const std::vector<std::pair<llvm::Value *, const location *>> &vals,
       const std::string &name);
+  void createTupleCopy(const SizedType &expr_type,
+                       const SizedType &var_type,
+                       Value *dst_val,
+                       Value *src_val);
 
   void generate_ir(void);
   libbpf::bpf_map_type get_map_type(const SizedType &val_type,

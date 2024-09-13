@@ -45,8 +45,7 @@
 #include "types.h"
 #include "usdt.h"
 
-namespace bpftrace {
-namespace ast {
+namespace bpftrace::ast {
 
 CodegenLLVM::CodegenLLVM(Node *root, BPFtrace &bpftrace)
     : CodegenLLVM(root, bpftrace, std::make_unique<USDTHelper>())
@@ -821,8 +820,9 @@ void CodegenLLVM::visit(Call &call)
       length = b_.CreateSelect(
           cmp, proposed_length, max_length, "length.select");
 
-      if (arg.is_literal)
-        fixed_buffer_length = *bpftrace_.get_int_literal(&arg);
+      auto literal_length = bpftrace_.get_int_literal(&arg);
+      if (literal_length)
+        fixed_buffer_length = *literal_length;
     } else {
       auto &arg = *call.vargs.at(0);
       fixed_buffer_length = arg.type.GetNumElements() *
@@ -854,19 +854,12 @@ void CodegenLLVM::visit(Call &call)
 
     auto scoped_del = accept(call.vargs.front());
     auto arg0 = call.vargs.front();
-    // arg0 is already on the bpf stack -> use memcpy
-    // otherwise -> probe read in addrspace of arg0->type
-    // case : struct MyStruct { char b[4]; };
-    // $s = (struct MyStruct *)arg0; buf($s->b, 4)
-    if (shouldBeOnStackAlready(arg0->type))
-      b_.CREATE_MEMCPY(buf_data_offset, expr_, length, 1);
-    else
-      b_.CreateProbeRead(ctx_,
-                         buf_data_offset,
-                         length,
-                         expr_,
-                         find_addrspace_stack(arg0->type),
-                         call.loc);
+    b_.CreateProbeRead(ctx_,
+                       buf_data_offset,
+                       length,
+                       expr_,
+                       find_addrspace_stack(arg0->type),
+                       call.loc);
 
     expr_ = buf;
   } else if (call.func == "path") {
@@ -874,7 +867,21 @@ void CodegenLLVM::visit(Call &call)
     b_.CreateMemsetBPF(buf,
                        b_.getInt8(0),
                        bpftrace_.config_.get(ConfigKeyInt::max_strlen));
-    call.vargs.front()->accept(*this);
+    const uint64_t max_size = bpftrace_.config_.get(ConfigKeyInt::max_strlen);
+    Value *sz;
+    if (call.vargs.size() > 1) {
+      auto &arg = *call.vargs.at(1);
+      auto scoped_del = accept(&arg);
+      Value *pr_sz = b_.CreateIntCast(expr_, b_.getInt32Ty(), false);
+      Value *max_sz = b_.getInt32(max_size);
+      Value *cmp = b_.CreateICmp(
+          CmpInst::ICMP_ULE, pr_sz, max_sz, "path.size.cmp");
+      sz = b_.CreateSelect(cmp, pr_sz, max_sz, "path.size.select");
+    } else {
+      sz = b_.getInt32(max_size);
+    }
+
+    auto scoped_del = accept(call.vargs.front());
     b_.CreatePath(ctx_,
                   buf,
                   b_.CreateCast(expr_->getType()->isPointerTy()
@@ -882,6 +889,7 @@ void CodegenLLVM::visit(Call &call)
                                     : Instruction::IntToPtr,
                                 expr_,
                                 b_.GET_PTR_TY()),
+                  sz,
                   call.loc);
     expr_ = buf;
   } else if (call.func == "kaddr") {
@@ -1091,8 +1099,7 @@ void CodegenLLVM::visit(Call &call)
         // and store it to data area
         Value *offset = b_.CreateGEP(b_.GetType(data_type),
                                      data,
-                                     { b_.getInt64(0),
-                                       b_.getInt64((i - 1) * ptr_size) });
+                                     { b_.getInt64(0), b_.getInt32(i - 1) });
         b_.CreateStore(
             expr_, b_.CreateBitCast(offset, expr_->getType()->getPointerTo()));
 
@@ -1314,7 +1321,10 @@ void CodegenLLVM::visit(Call &call)
   } else if (call.func == "strerror") {
     auto scoped_del = accept(call.vargs.front());
   } else if (call.func == "strncmp") {
-    uint64_t size = (uint64_t)*bpftrace_.get_int_literal(call.vargs.at(2));
+    auto size_opt = bpftrace_.get_int_literal(call.vargs.at(2));
+    if (!size_opt.has_value())
+      LOG(BUG) << "Int literal should have been checked in semantic analysis";
+    uint64_t size = static_cast<uint64_t>(*size_opt);
     const auto &left_arg = call.vargs.at(0);
     const auto &right_arg = call.vargs.at(1);
 
@@ -1351,8 +1361,8 @@ void CodegenLLVM::visit(Call &call)
     auto macaddr = call.vargs.front();
     auto scoped_del = accept(macaddr);
 
-    if (onStack(macaddr->type))
-      b_.CREATE_MEMCPY(buf, expr_, macaddr->type.GetSize(), 1);
+    if (inBpfMemory(macaddr->type))
+      b_.CreateMemcpyBPF(buf, expr_, macaddr->type.GetSize());
     else
       b_.CreateProbeRead(
           ctx_, static_cast<AllocaInst *>(buf), macaddr->type, expr_, call.loc);
@@ -1423,6 +1433,8 @@ void CodegenLLVM::visit(Call &call)
     expr_ = ret;
   } else if (call.func == "nsecs") {
     if (call.type.ts_mode == TimestampMode::sw_tai) {
+      if (!bpftrace_.delta_taitime_.has_value())
+        LOG(BUG) << "Should have been checked in semantic analysis";
       uint64_t delta = bpftrace_.delta_taitime_->tv_sec * 1e9 +
                        bpftrace_.delta_taitime_->tv_nsec;
       expr_ = b_.CreateGetNs(TimestampMode::boot, call.loc);
@@ -1884,16 +1896,17 @@ void CodegenLLVM::visit(Ternary &ternary)
                                                "right",
                                                parent);
   BasicBlock *done = BasicBlock::Create(module_->getContext(), "done", parent);
+
   // ordering of all the following statements is important
-  Value *result = ternary.type.IsNoneTy()
-                      ? nullptr
-                      : b_.CreateAllocaBPF(ternary.type, "result");
-  AllocaInst *buf = ternary.type.IsNoneTy()
-                        ? nullptr
-                        : b_.CreateAllocaBPF(ternary.type, "buf");
-  Value *cond;
+  Value *buf = nullptr;
+  if (ternary.type.IsStringTy()) {
+    buf = b_.CreateGetStrScratchMap(async_ids_.str(), nullptr, ternary.loc);
+    uint64_t max_strlen = bpftrace_.config_.get(ConfigKeyInt::max_strlen);
+    b_.CreateMemsetBPF(buf, b_.getInt8(0), max_strlen);
+  }
+
   auto scoped_del = accept(ternary.cond);
-  cond = expr_;
+  Value *cond = expr_;
   Value *zero_value = Constant::getNullValue(cond->getType());
   b_.CreateCondBr(b_.CreateICmpNE(cond, zero_value, "true_cond"),
                   left_block,
@@ -1903,37 +1916,36 @@ void CodegenLLVM::visit(Ternary &ternary)
     // fetch selected integer via CreateStore
     b_.SetInsertPoint(left_block);
     auto scoped_del_left = accept(ternary.left);
-    expr_ = b_.CreateIntCast(expr_,
-                             b_.GetType(ternary.type),
-                             ternary.type.IsSigned());
-    b_.CreateStore(expr_, result);
+    auto left_expr = b_.CreateIntCast(expr_,
+                                      b_.GetType(ternary.type),
+                                      ternary.type.IsSigned());
     b_.CreateBr(done);
 
     b_.SetInsertPoint(right_block);
     auto scoped_del_right = accept(ternary.right);
-    expr_ = b_.CreateIntCast(expr_,
-                             b_.GetType(ternary.type),
-                             ternary.type.IsSigned());
-    b_.CreateStore(expr_, result);
+    auto right_expr = b_.CreateIntCast(expr_,
+                                       b_.GetType(ternary.type),
+                                       ternary.type.IsSigned());
     b_.CreateBr(done);
 
     b_.SetInsertPoint(done);
-    expr_ = b_.CreateLoad(b_.GetType(ternary.type), result);
+    auto phi = b_.CreatePHI(b_.GetType(ternary.type), 2, "result");
+    phi->addIncoming(left_expr, left_block);
+    phi->addIncoming(right_expr, right_block);
+    expr_ = phi;
   } else if (ternary.type.IsStringTy()) {
-    // copy selected string via CreateMemCpy
     b_.SetInsertPoint(left_block);
     auto scoped_del_left = accept(ternary.left);
-    b_.CREATE_MEMCPY(buf, expr_, ternary.type.GetSize(), 1);
+    b_.CreateMemcpyBPF(buf, expr_, ternary.type.GetSize());
     b_.CreateBr(done);
 
     b_.SetInsertPoint(right_block);
     auto scoped_del_right = accept(ternary.right);
-    b_.CREATE_MEMCPY(buf, expr_, ternary.type.GetSize(), 1);
+    b_.CreateMemcpyBPF(buf, expr_, ternary.type.GetSize());
     b_.CreateBr(done);
 
     b_.SetInsertPoint(done);
     expr_ = buf;
-    expr_deleter_ = [this, buf]() { b_.CreateLifetimeEnd(buf); };
   } else {
     // Type::none
     b_.SetInsertPoint(left_block);
@@ -1993,7 +2005,7 @@ void CodegenLLVM::visit(FieldAccess &acc)
                               { b_.getInt32(0), b_.getInt32(acc.index) });
     SizedType &elem_type = type.GetFields()[acc.index].type;
 
-    if (shouldBeOnStackAlready(elem_type)) {
+    if (shouldBeInBpfMemoryAlready(elem_type)) {
       expr_ = src;
       // Extend lifetime of source buffer
       expr_deleter_ = scoped_del.disarm();
@@ -2019,7 +2031,7 @@ void CodegenLLVM::visit(FieldAccess &acc)
 
   auto &field = type.GetField(acc.field);
 
-  if (onStack(type)) {
+  if (inBpfMemory(type)) {
     readDatastructElemFromStack(
         expr_, b_.getInt64(field.offset), type, field.type, scoped_del);
   } else {
@@ -2107,7 +2119,7 @@ void CodegenLLVM::visit(ArrayAccess &arr)
 
   auto scoped_del_index = accept(arr.indexpr);
 
-  if (onStack(type))
+  if (inBpfMemory(type))
     readDatastructElemFromStack(array, expr_, type, elem_type, scoped_del_expr);
   else {
     if (array->getType()->isPointerTy())
@@ -2223,14 +2235,41 @@ AllocaInst *CodegenLLVM::createTuple(
                               buf,
                               { b_.getInt32(0), b_.getInt32(i) });
 
-    if (onStack(type))
-      b_.CREATE_MEMCPY(dst, val, type.GetSize(), 1);
+    if (inBpfMemory(type))
+      b_.CreateMemcpyBPF(dst, val, type.GetSize());
     else if (type.IsArrayTy() || type.IsRecordTy())
       b_.CreateProbeRead(ctx_, dst, type, val, *loc);
     else
       b_.CreateStore(val, dst);
   }
   return buf;
+}
+
+void CodegenLLVM::createTupleCopy(const SizedType &expr_type,
+                                  const SizedType &var_type,
+                                  Value *dst_val,
+                                  Value *src_val)
+{
+  assert(expr_type.IsTupleTy() && var_type.IsTupleTy());
+  auto *array_ty = ArrayType::get(b_.getInt8Ty(), expr_type.GetSize());
+  auto *tuple_ty = b_.GetType(var_type);
+  for (size_t i = 0; i < expr_type.GetFields().size(); ++i) {
+    SizedType &t_type = expr_type.GetField(i).type;
+    Value *offset_val = b_.CreateGEP(
+        array_ty,
+        b_.CreatePointerCast(src_val, array_ty->getPointerTo()),
+        { b_.getInt64(0), b_.getInt64(expr_type.GetField(i).offset) });
+    Value *dst = b_.CreateGEP(tuple_ty,
+                              b_.CreatePointerCast(dst_val,
+                                                   tuple_ty->getPointerTo()),
+                              { b_.getInt32(0), b_.getInt32(i) });
+    if (t_type.IsTupleTy() &&
+        t_type.GetSize() != var_type.GetField(i).type.GetSize()) {
+      createTupleCopy(t_type, var_type.GetField(i).type, dst, offset_val);
+    } else {
+      b_.CreateMemcpyBPF(dst, offset_val, t_type.GetSize());
+    }
+  }
 }
 
 void CodegenLLVM::visit(Tuple &tuple)
@@ -2271,29 +2310,33 @@ void CodegenLLVM::visit(AssignMapStatement &assignment)
   Value *val, *expr;
   expr = expr_;
   auto [key, scoped_key_deleter] = getMapKey(map);
-  if (shouldBeOnStackAlready(assignment.expr->type)) {
-    if ((assignment.expr->type.IsStringTy() ||
-         assignment.expr->type.IsTupleTy()) &&
-        assignment.expr->type.GetSize() != map.type.GetSize()) {
+  auto &expr_type = assignment.expr->type;
+  if (shouldBeInBpfMemoryAlready(expr_type)) {
+    if (expr_type.GetSize() != map.type.GetSize()) {
       val = b_.CreateAllocaBPF(map.type, map.ident + "_val");
       b_.CreateMemsetBPF(val, b_.getInt8(0), map.type.GetSize());
-      b_.CREATE_MEMCPY(val, expr, assignment.expr->type.GetSize(), 1);
-      self_alloca = true;
-    } else
+      if (expr_type.IsTupleTy()) {
+        createTupleCopy(expr_type, map.type, val, expr);
+        self_alloca = true;
+      } else if (expr_type.IsStringTy()) {
+        b_.CreateMemcpyBPF(val, expr, expr_type.GetSize());
+        self_alloca = true;
+      } else {
+        LOG(BUG) << "Type size mismatch. Map Type Size: " << map.type.GetSize()
+                 << " Expression Type Size: " << expr_type.GetSize();
+      }
+    } else {
       val = expr;
+    }
   } else if (map.type.IsRecordTy() || map.type.IsArrayTy()) {
-    if (assignment.expr->type.is_internal) {
+    if (expr_type.is_internal) {
       val = expr;
     } else {
       // expr currently contains a pointer to the struct or array
       // We now want to read the entire struct/array in so we can save it
       AllocaInst *dst = b_.CreateAllocaBPF(map.type, map.ident + "_val");
-      b_.CreateProbeRead(ctx_,
-                         dst,
-                         map.type,
-                         expr,
-                         assignment.loc,
-                         assignment.expr->type.GetAS());
+      b_.CreateProbeRead(
+          ctx_, dst, map.type, expr, assignment.loc, expr_type.GetAS());
       val = dst;
       self_alloca = true;
     }
@@ -2348,9 +2391,17 @@ void CodegenLLVM::visit(AssignVarStatement &assignment)
     scoped_del.disarm();
   } else if (needMemcpy(var.type)) {
     auto *val = variables_[var.ident].value;
-    if (assignment.expr->type.GetSize() != var.type.GetSize())
+    auto &expr_type = assignment.expr->type;
+    if (expr_type.GetSize() != var.type.GetSize()) {
       b_.CreateMemsetBPF(val, b_.getInt8(0), var.type.GetSize());
-    b_.CREATE_MEMCPY(val, expr_, assignment.expr->type.GetSize(), 1);
+      if (var.type.IsTupleTy()) {
+        createTupleCopy(expr_type, var.type, val, expr_);
+      } else {
+        b_.CreateMemcpyBPF(val, expr_, expr_type.GetSize());
+      }
+    } else {
+      b_.CreateMemcpyBPF(val, expr_, expr_type.GetSize());
+    }
   } else {
     b_.CreateStore(expr_, variables_[var.ident].value);
   }
@@ -2850,13 +2901,13 @@ std::tuple<Value *, CodegenLLVM::ScopedExprDeleter> CodegenLLVM::getMapKey(
     if (map.vargs.size() == 1) {
       Expression *expr = map.vargs.at(0);
       auto scoped_del = accept(expr);
-      if (onStack(expr->type)) {
+      if (inBpfMemory(expr->type)) {
         auto &key_type = map.key_type.args_[0];
         if (expr->type.IsStringTy() &&
             expr->type.GetSize() != key_type.GetSize()) {
           key = b_.CreateAllocaBPF(key_type, map.ident + "_key");
           b_.CreateMemsetBPF(key, b_.getInt8(0), key_type.GetSize());
-          b_.CREATE_MEMCPY(key, expr_, expr->type.GetSize(), 1);
+          b_.CreateMemcpyBPF(key, expr_, expr->type.GetSize());
         } else {
           key = expr_;
           // Call-ee freed
@@ -2921,10 +2972,10 @@ AllocaInst *CodegenLLVM::getMultiMapKey(Map &map,
                                      { b_.getInt64(0), b_.getInt64(offset) });
     size_t map_key_size = map.key_type.args_[i++].GetSize();
 
-    if (onStack(expr->type)) {
+    if (inBpfMemory(expr->type)) {
       if (expr->type.IsStringTy() && expr->type.GetSize() < map_key_size)
         b_.CreateMemsetBPF(offset_val, b_.getInt8(0), map_key_size);
-      b_.CREATE_MEMCPY(offset_val, expr_, expr->type.GetSize(), 1);
+      b_.CreateMemcpyBPF(offset_val, expr_, expr->type.GetSize());
       if ((map_key_size % 8) != 0)
         aligned = false;
     } else {
@@ -3318,7 +3369,7 @@ MDNode *CodegenLLVM::createLoopMetadata()
 
 void CodegenLLVM::createFormatStringCall(Call &call,
                                          int id,
-                                         CallArgs &call_args,
+                                         const CallArgs &call_args,
                                          const std::string &call_name,
                                          AsyncAction async_action)
 {
@@ -3330,8 +3381,8 @@ void CodegenLLVM::createFormatStringCall(Call &call,
    */
   std::vector<llvm::Type *> elements = { b_.getInt64Ty() }; // ID
 
-  auto &args = std::get<1>(call_args.at(id));
-  for (Field &arg : args) {
+  const auto &args = std::get<1>(call_args.at(id));
+  for (const Field &arg : args) {
     llvm::Type *ty = b_.GetType(arg.type);
     elements.push_back(ty);
   }
@@ -3340,29 +3391,37 @@ void CodegenLLVM::createFormatStringCall(Call &call,
                                               false);
   int struct_size = datalayout().getTypeAllocSize(fmt_struct);
 
+  // Check that offsets created during resource analysis match what LLVM
+  // expects. This is just a guard rail against bad padding analysis logic.
   auto *struct_layout = datalayout().getStructLayout(fmt_struct);
   for (size_t i = 0; i < args.size(); i++) {
-    Field &arg = args[i];
-    arg.offset = struct_layout->getElementOffset(i + 1); // +1 for the id field
+    size_t offset = static_cast<size_t>(args[i].offset);
+    // +1 for the id field
+    size_t expected_offset = struct_layout->getElementOffset(i + 1);
+    if (offset != expected_offset)
+      LOG(BUG) << "Calculated offset=" << offset
+               << " does not match LLVM offset=" << expected_offset;
   }
 
-  AllocaInst *fmt_args = b_.CreateAllocaBPF(fmt_struct, call_name + "_args");
-  // as the struct is not packed we need to memset it.
+  Value *fmt_args = b_.CreateGetFmtStringArgsScratchMap(nullptr, call.loc);
+  // The struct is not packed so we need to memset it
   b_.CreateMemsetBPF(fmt_args, b_.getInt8(0), struct_size);
 
-  Value *id_offset = b_.CreateGEP(fmt_struct,
-                                  fmt_args,
-                                  { b_.getInt32(0), b_.getInt32(0) });
+  Value *id_offset = b_.CreateGEP(
+      fmt_struct,
+      b_.CreatePointerCast(fmt_args, fmt_struct->getPointerTo()),
+      { b_.getInt32(0), b_.getInt32(0) });
   b_.CreateStore(b_.getInt64(id + asyncactionint(async_action)), id_offset);
 
   for (size_t i = 1; i < call.vargs.size(); i++) {
     Expression &arg = *call.vargs.at(i);
     auto scoped_del = accept(&arg);
-    Value *offset = b_.CreateGEP(fmt_struct,
-                                 fmt_args,
-                                 { b_.getInt32(0), b_.getInt32(i) });
+    Value *offset = b_.CreateGEP(
+        fmt_struct,
+        b_.CreatePointerCast(fmt_args, fmt_struct->getPointerTo()),
+        { b_.getInt32(0), b_.getInt32(i) });
     if (needMemcpy(arg.type))
-      b_.CREATE_MEMCPY(offset, expr_, arg.type.GetSize(), 1);
+      b_.CreateMemcpyBPF(offset, expr_, arg.type.GetSize());
     else if (arg.type.IsIntegerTy() && arg.type.GetSize() < 8)
       b_.CreateStore(
           b_.CreateIntCast(expr_, b_.getInt64Ty(), arg.type.IsSigned()),
@@ -3372,7 +3431,6 @@ void CodegenLLVM::createFormatStringCall(Call &call,
   }
 
   b_.CreateOutput(ctx_, fmt_args, struct_size, &call.loc);
-  b_.CreateLifetimeEnd(fmt_args);
   expr_ = nullptr;
 }
 
@@ -3489,27 +3547,32 @@ void CodegenLLVM::createPrintNonMapCall(Call &call, int id)
   StructType *print_struct = b_.GetStructType(struct_name.str(),
                                               elements,
                                               true);
-  AllocaInst *buf = b_.CreateAllocaBPF(print_struct, struct_name.str());
+  Value *buf = b_.CreateGetFmtStringArgsScratchMap(nullptr, call.loc);
   size_t struct_size = datalayout().getTypeAllocSize(print_struct);
 
   // Store asyncactionid:
   b_.CreateStore(
       b_.getInt64(asyncactionint(AsyncAction::print_non_map)),
-      b_.CreateGEP(print_struct, buf, { b_.getInt64(0), b_.getInt32(0) }));
+      b_.CreateGEP(print_struct,
+                   b_.CreatePointerCast(buf, print_struct->getPointerTo()),
+                   { b_.getInt64(0), b_.getInt32(0) }));
 
   // Store print id
   b_.CreateStore(
       b_.getInt64(id),
-      b_.CreateGEP(print_struct, buf, { b_.getInt64(0), b_.getInt32(1) }));
+      b_.CreateGEP(print_struct,
+                   b_.CreatePointerCast(buf, print_struct->getPointerTo()),
+                   { b_.getInt64(0), b_.getInt32(1) }));
 
   // Store content
-  Value *content_offset = b_.CreateGEP(print_struct,
-                                       buf,
-                                       { b_.getInt32(0), b_.getInt32(2) });
+  Value *content_offset = b_.CreateGEP(
+      print_struct,
+      b_.CreatePointerCast(buf, print_struct->getPointerTo()),
+      { b_.getInt32(0), b_.getInt32(2) });
   b_.CreateMemsetBPF(content_offset, b_.getInt8(0), arg.type.GetSize());
   if (needMemcpy(arg.type)) {
-    if (onStack(arg.type))
-      b_.CREATE_MEMCPY(content_offset, expr_, arg.type.GetSize(), 1);
+    if (inBpfMemory(arg.type))
+      b_.CreateMemcpyBPF(content_offset, expr_, arg.type.GetSize());
     else
       b_.CreateProbeRead(ctx_, content_offset, arg.type, expr_, arg.loc);
   } else {
@@ -3519,7 +3582,6 @@ void CodegenLLVM::createPrintNonMapCall(Call &call, int id)
   }
 
   b_.CreateOutput(ctx_, buf, struct_size, &call.loc);
-  b_.CreateLifetimeEnd(buf);
   expr_ = nullptr;
 }
 
@@ -3696,6 +3758,7 @@ void CodegenLLVM::generate_maps(const RequiredResources &resources)
                         MapKey({ CreateInt32() }),
                         CreateArray(max_strlen, CreateInt8()));
   }
+
   int loss_cnt_key_size = sizeof(bpftrace_.event_loss_cnt_key_) * 8;
   int loss_cnt_val_size = sizeof(bpftrace_.event_loss_cnt_val_) * 8;
   createMapDefinition(to_string(MapType::EventLossCounter),
@@ -3703,6 +3766,15 @@ void CodegenLLVM::generate_maps(const RequiredResources &resources)
                       1,
                       MapKey({ CreateInt(loss_cnt_key_size) }),
                       CreateInt(loss_cnt_val_size));
+
+  if (resources.max_fmtstring_args_size > 0) {
+    createMapDefinition(to_string(MapType::FmtStringArgs),
+                        libbpf::BPF_MAP_TYPE_PERCPU_ARRAY,
+                        1,
+                        MapKey({ CreateInt32() }),
+                        CreateArray(resources.max_fmtstring_args_size,
+                                    CreateInt8()));
+  }
 }
 
 void CodegenLLVM::generate_global_vars(const RequiredResources &resources)
@@ -3788,7 +3860,7 @@ void CodegenLLVM::optimize()
   state_ = State::OPT;
 }
 
-bool CodegenLLVM::verify(void)
+bool CodegenLLVM::verify()
 {
   bool ret = llvm::verifyModule(*module_, &errs());
   if (ret) {
@@ -3813,7 +3885,7 @@ void CodegenLLVM::emit(raw_pwrite_stream &stream)
   PM.run(*module_.get());
 }
 
-BpfBytecode CodegenLLVM::emit(void)
+BpfBytecode CodegenLLVM::emit()
 {
   assert(state_ == State::OPT);
   SmallVector<char, 0> output;
@@ -3824,17 +3896,17 @@ BpfBytecode CodegenLLVM::emit(void)
   assert(!output.empty());
 
   state_ = State::DONE;
-  return BpfBytecode(output.data(), output.size(), bpftrace_);
+  return BpfBytecode{ output };
 }
 
-BpfBytecode CodegenLLVM::compile(void)
+BpfBytecode CodegenLLVM::compile()
 {
   generate_ir();
   optimize();
   return emit();
 }
 
-void CodegenLLVM::DumpIR(void)
+void CodegenLLVM::DumpIR()
 {
   DumpIR(std::cout);
 }
@@ -3946,7 +4018,7 @@ void CodegenLLVM::probereadDatastructElem(Value *src_data,
     if (elem_type.IsStringTy() && data_type.is_btftype) {
       if (src->getType()->isIntegerTy())
         src = b_.CreateIntToPtr(src, dst->getType());
-      b_.CREATE_MEMCPY(dst, src, elem_type.GetSize(), 1);
+      b_.CreateMemcpyBPF(dst, src, elem_type.GetSize());
     } else {
       b_.CreateProbeRead(ctx_, dst, elem_type, src, loc, data_type.GetAS());
     }
@@ -4277,7 +4349,7 @@ Function *CodegenLLVM::createForEachMapCallback(const For &f, llvm::Type *ctx_t)
 
   auto &key_type = f.decl->type.GetField(0).type;
   Value *key = callback->getArg(1);
-  if (!onStack(key_type)) {
+  if (!inBpfMemory(key_type)) {
     key = b_.CreateLoad(b_.GetType(key_type), key, "key");
   }
 
@@ -4297,7 +4369,7 @@ Function *CodegenLLVM::createForEachMapCallback(const For &f, llvm::Type *ctx_t)
     b_.CreateStore(key, key_ptr);
 
     val = b_.CreatePerCpuMapAggElems(ctx_, map, key_ptr, map_val_type, map.loc);
-  } else if (!onStack(val_type)) {
+  } else if (!inBpfMemory(val_type)) {
     val = b_.CreateLoad(b_.GetType(val_type), val, "val");
   }
 
@@ -4391,5 +4463,4 @@ Value *CodegenLLVM::createFmtString(int print_id)
   return res;
 }
 
-} // namespace ast
-} // namespace bpftrace
+} // namespace bpftrace::ast

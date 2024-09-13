@@ -12,8 +12,16 @@
 
 namespace bpftrace {
 
-BpfBytecode::BpfBytecode(const void *elf, size_t elf_size, BPFtrace &bpftrace)
-    : log_size_(bpftrace.config_.get(ConfigKeyInt::log_size))
+BpfBytecode::BpfBytecode(std::span<uint8_t> elf)
+    : BpfBytecode(std::as_bytes(elf))
+{
+}
+
+BpfBytecode::BpfBytecode(std::span<char> elf) : BpfBytecode(std::as_bytes(elf))
+{
+}
+
+BpfBytecode::BpfBytecode(std::span<const std::byte> elf)
 {
   int log_level = 0;
   // In debug mode, show full verifier log.
@@ -28,43 +36,26 @@ BpfBytecode::BpfBytecode(const void *elf, size_t elf_size, BPFtrace &bpftrace)
                        .kernel_log_level = static_cast<__u32>(log_level));
 
   bpf_object_ = std::unique_ptr<struct bpf_object, bpf_object_deleter>(
-      bpf_object__open_mem(elf, elf_size, &opts));
+      bpf_object__open_mem(elf.data(), elf.size(), &opts));
   if (!bpf_object_)
     LOG(BUG) << "The produced ELF is not a valid BPF object";
-
-  struct bpf_map *global_vars_map = nullptr;
-  bool needs_global_vars = !bpftrace.resources.needed_global_vars.empty();
 
   // Discover maps
   struct bpf_map *m;
   bpf_map__for_each (m, bpf_object_.get()) {
-    if (needs_global_vars) {
-      std::string_view name = bpf_map__name(m);
-      // there are some random chars in the beginning of the map name
-      if (name.npos != name.find(globalvars::SECTION_NAME)) {
-        global_vars_map = m;
-        continue;
-      }
+    std::string_view name = bpf_map__name(m);
+    // there are some random chars in the beginning of the map name
+    if (name.npos != name.find(globalvars::SECTION_NAME)) {
+      global_vars_map_ = m;
+      continue;
     }
     maps_.emplace(bpftrace_map_name(bpf_map__name(m)), m);
-  }
-
-  if (needs_global_vars) {
-    if (!global_vars_map) {
-      LOG(BUG) << "No map found for " << globalvars::SECTION_NAME
-               << " which is needed to set global variables";
-    }
-    globalvars::update_global_vars(bpf_object_.get(),
-                                   global_vars_map,
-                                   bpftrace);
   }
 
   // Discover programs
   struct bpf_program *p;
   bpf_object__for_each_program (p, bpf_object_.get()) {
-    auto prog = programs_.emplace(bpf_program__name(p),
-                                  BpfProgram(p, log_size_));
-    bpf_program__set_log_buf(p, prog.first->second.log_buf(), log_size_);
+    programs_.emplace(bpf_program__name(p), BpfProgram(p));
   }
 }
 
@@ -100,6 +91,18 @@ BpfProgram &BpfBytecode::getProgramForProbe(const Probe &probe)
 {
   return const_cast<BpfProgram &>(
       const_cast<const BpfBytecode *>(this)->getProgramForProbe(probe));
+}
+
+void BpfBytecode::update_global_vars(BPFtrace &bpftrace)
+{
+  bool needs_global_vars = !bpftrace.resources.needed_global_vars.empty();
+  if (!needs_global_vars)
+    return;
+  if (!global_vars_map_) {
+    LOG(BUG) << "No map found for " << globalvars::SECTION_NAME
+             << " which is needed to set global variables";
+  }
+  globalvars::update_global_vars(bpf_object_.get(), global_vars_map_, bpftrace);
 }
 
 namespace {
@@ -165,6 +168,14 @@ void BpfBytecode::load_progs(const RequiredResources &resources,
                              BPFfeature &feature,
                              const Config &config)
 {
+  std::unordered_map<std::string_view, std::vector<char>> log_bufs;
+  for (auto &[name, prog] : programs_) {
+    log_bufs[name] = std::vector<char>(config.get(ConfigKeyInt::log_size),
+                                       '\0');
+    auto &log_buf = log_bufs[name];
+    bpf_program__set_log_buf(prog.bpf_prog(), log_buf.data(), log_buf.size());
+  }
+
   prepare_progs(resources.probes, btf, feature, config);
   prepare_progs(resources.special_probes, btf, feature, config);
   prepare_progs(resources.watchpoint_probes, btf, feature, config);
@@ -176,7 +187,7 @@ void BpfBytecode::load_progs(const RequiredResources &resources,
     if (bt_debug.find(DebugStage::Verifier) != bt_debug.end()) {
       std::cout << "BPF verifier log for " << name << ":\n";
       std::cout << "--------------------------------------\n";
-      std::cout << prog.log_buf() << std::endl;
+      std::cout << log_bufs[name].data() << std::endl;
     }
   }
 
@@ -194,7 +205,7 @@ void BpfBytecode::load_progs(const RequiredResources &resources,
     // caused the failure. It can mean that libbpf didn't even try to load it
     // b/c some other program failed to load. So, we only log program load
     // failures when the verifier log is non-empty.
-    std::string_view log(prog.log_buf());
+    std::string_view log(log_bufs[name].data());
     if (!log.empty()) {
       // This should be the only error that may occur here and does not imply
       // a bpftrace bug so throw immediately with a proper error message.
@@ -213,7 +224,7 @@ void BpfBytecode::load_progs(const RequiredResources &resources,
               << "Kernel log seems to be trimmed. This may be due to buffer "
                  "not being big enough, try increasing the BPFTRACE_LOG_SIZE "
                  "environment variable beyond the current value of "
-              << log_size_ << " bytes";
+              << log_bufs[name].size() << " bytes";
         }
       } else {
         errmsg << " Use -v for full kernel error log.";

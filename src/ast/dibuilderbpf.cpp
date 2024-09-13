@@ -7,8 +7,7 @@
 
 #include <llvm/IR/Function.h>
 
-namespace bpftrace {
-namespace ast {
+namespace bpftrace::ast {
 
 DIBuilderBPF::DIBuilderBPF(Module &module) : DIBuilder(module)
 {
@@ -40,7 +39,8 @@ void DIBuilderBPF::createFunctionDebugInfo(Function &func)
                                          DINode::FlagPrototyped,
                                          flags);
 
-  createParameterVariable(subprog, "ctx", 1, file, 0, (DIType *)types[1], true);
+  createParameterVariable(
+      subprog, "ctx", 1, file, 0, static_cast<DIType *>(types[1]), true);
 
   func.setSubprogram(subprog);
 }
@@ -297,5 +297,4 @@ DIGlobalVariableExpression *DIBuilderBPF::createGlobalInt64(
       file, name, "global", file, 0, getInt64Ty(), false);
 }
 
-} // namespace ast
-} // namespace bpftrace
+} // namespace bpftrace::ast

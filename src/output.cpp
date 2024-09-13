@@ -27,6 +27,7 @@ bool is_quoted_type(const SizedType &ty)
     case Type::probe:
     case Type::strerror:
     case Type::string:
+    case Type::timestamp:
     case Type::username:
     case Type::ustack:
     case Type::usym:
@@ -42,11 +43,11 @@ bool is_quoted_type(const SizedType &ty)
     case Type::min:
     case Type::none:
     case Type::pointer:
+    case Type::reference:
     case Type::record:
     case Type::stack_mode:
     case Type::stats:
     case Type::sum:
-    case Type::timestamp:
     case Type::timestamp_mode:
     case Type::tuple:
     case Type::voidtype:
@@ -264,7 +265,7 @@ std::string Output::value_to_str(BPFtrace &bpftrace,
                                  read_data<uint64_t>(value.data() + 16));
   else if (type.IsInetTy())
     return bpftrace.resolve_inet(read_data<uint64_t>(value.data()),
-                                 (uint8_t *)(value.data() + 8));
+                                 static_cast<uint8_t *>(value.data() + 8));
   else if (type.IsUsernameTy())
     return bpftrace.resolve_uid(read_data<uint64_t>(value.data()));
   else if (type.IsBufferTy()) {
@@ -325,22 +326,22 @@ std::string Output::value_to_str(BPFtrace &bpftrace,
       // clang-format off
       case 64:
         if (sign)
-          return std::to_string(reduce_value<int64_t>(value, nvalues) / (int64_t)div);
+          return std::to_string(reduce_value<int64_t>(value, nvalues) / static_cast<int64_t>(div));
         return std::to_string(reduce_value<uint64_t>(value, nvalues) / div);
       case 32:
         if (sign)
           return std::to_string(
-              reduce_value<int32_t>(value, nvalues) / (int32_t)div);
+              reduce_value<int32_t>(value, nvalues) / static_cast<int32_t>(div));
         return std::to_string(reduce_value<uint32_t>(value, nvalues) / div);
       case 16:
         if (sign)
           return std::to_string(
-              reduce_value<int16_t>(value, nvalues) / (int16_t)div);
+              reduce_value<int16_t>(value, nvalues) / static_cast<int16_t>(div));
         return std::to_string(reduce_value<uint16_t>(value, nvalues) / div);
       case 8:
         if (sign)
           return std::to_string(
-              reduce_value<int8_t>(value, nvalues) / (int8_t)div);
+              reduce_value<int8_t>(value, nvalues) / static_cast<int8_t>(div));
         return std::to_string(reduce_value<uint8_t>(value, nvalues) / div);
         // clang-format on
       default:
@@ -382,7 +383,7 @@ std::string Output::value_to_str(BPFtrace &bpftrace,
         reinterpret_cast<AsyncEvent::CgroupPath *>(value.data())->cgroup_id);
   else if (type.IsStrerrorTy())
     return strerror(read_data<uint64_t>(value.data()));
-  else if (type.IsPtrTy()) {
+  else if (type.IsPtrTy() || type.IsRefTy()) {
     std::ostringstream res;
     res << "0x" << std::hex << read_data<uint64_t>(value.data());
     return res.str();
@@ -580,7 +581,7 @@ std::string TextOutput::hist_to_str(const std::vector<uint64_t> &values,
     }
 
     int max_width = 52;
-    int bar_width = values.at(i) / (float)max_value * max_width;
+    int bar_width = values.at(i) / static_cast<float>(max_value) * max_width;
     std::string bar(bar_width, '@');
 
     res << std::setw(16) << std::left << header.str() << std::setw(8)
@@ -611,7 +612,7 @@ std::string TextOutput::lhist_to_str(const std::vector<uint64_t> &values,
   std::ostringstream res;
   for (int i = start_value; i <= end_value; i++) {
     int max_width = 52;
-    int bar_width = values.at(i) / (float)max_value * max_width;
+    int bar_width = values.at(i) / static_cast<float>(max_value) * max_width;
     std::ostringstream header;
     if (i == 0) {
       header << "(..., " << lhist_index_label(min, step) << ")";
@@ -771,7 +772,7 @@ std::string JsonOutput::json_escape(const std::string &str) const
         // c always >= '\x00'
         if (c <= '\x1f') {
           escaped << "\\u" << std::hex << std::setw(4) << std::setfill('0')
-                  << (int)c;
+                  << static_cast<int>(c);
         } else {
           escaped << c;
         }
@@ -793,7 +794,7 @@ void JsonOutput::map(
 
   const auto &map_key = bpftrace.resources.maps_info.at(map.name()).key;
 
-  out_ << "{\"type\": \"" << MessageType::map << "\", \"data\": {";
+  out_ << R"({"type": ")" << MessageType::map << R"(", "data": {)";
   out_ << "\"" << json_escape(map.name()) << "\": ";
   if (map_key.size() > 0) // check if this map has keys
     out_ << "{";
@@ -903,7 +904,7 @@ void JsonOutput::map_hist(
 
   const auto &map_key = bpftrace.resources.maps_info.at(map.name()).key;
 
-  out_ << "{\"type\": \"" << MessageType::hist << "\", \"data\": {";
+  out_ << R"({"type": ")" << MessageType::hist << R"(", "data": {)";
   out_ << "\"" << json_escape(map.name()) << "\": ";
   if (map_key.size() > 0) // check if this map has keys
     out_ << "{";
@@ -929,7 +930,7 @@ void JsonOutput::map_stats(
 
   const auto &map_key = bpftrace.resources.maps_info.at(map.name()).key;
 
-  out_ << "{\"type\": \"" << MessageType::stats << "\", \"data\": {";
+  out_ << R"({"type": ")" << MessageType::stats << R"(", "data": {)";
   out_ << "\"" << json_escape(map.name()) << "\": ";
   if (map_key.size() > 0) // check if this map has keys
     out_ << "{";
@@ -945,16 +946,15 @@ void JsonOutput::value(BPFtrace &bpftrace,
                        const SizedType &ty,
                        std::vector<uint8_t> &value) const
 {
-  out_ << "{\"type\": \"" << MessageType::value
-       << "\", \"data\": " << value_to_str(bpftrace, ty, value, false, 1) << "}"
-       << std::endl;
+  out_ << R"({"type": ")" << MessageType::value << R"(", "data": )"
+       << value_to_str(bpftrace, ty, value, false, 1) << "}" << std::endl;
 }
 
 void JsonOutput::message(MessageType type,
                          const std::string &msg,
                          bool nl __attribute__((unused))) const
 {
-  out_ << "{\"type\": \"" << type << "\", \"data\": \"" << json_escape(msg)
+  out_ << R"({"type": ")" << type << R"(", "data": ")" << json_escape(msg)
        << "\"}" << std::endl;
 }
 
@@ -962,7 +962,7 @@ void JsonOutput::message(MessageType type,
                          const std::string &field,
                          uint64_t value) const
 {
-  out_ << "{\"type\": \"" << type << "\", \"data\": "
+  out_ << R"({"type": ")" << type << R"(", "data": )"
        << "{\"" << field << "\": " << value << "}"
        << "}" << std::endl;
 }
@@ -981,9 +981,9 @@ void JsonOutput::helper_error(int func_id,
                               int retcode,
                               const location &loc) const
 {
-  out_ << "{\"type\": \"helper_error\", \"msg\": \""
-       << get_helper_error_msg(func_id, retcode) << "\", \"helper\": \""
-       << libbpf::bpf_func_name[func_id] << "\", \"retcode\": " << retcode
+  out_ << R"({"type": "helper_error", "msg": ")"
+       << get_helper_error_msg(func_id, retcode) << R"(", "helper": ")"
+       << libbpf::bpf_func_name[func_id] << R"(", "retcode": )" << retcode
        << ", \"line\": " << loc.begin.line << ", \"col\": " << loc.begin.column
        << "}" << std::endl;
 }

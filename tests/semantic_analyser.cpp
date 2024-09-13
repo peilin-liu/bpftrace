@@ -9,9 +9,7 @@
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
 
-namespace bpftrace {
-namespace test {
-namespace semantic_analyser {
+namespace bpftrace::test::semantic_analyser {
 
 #include "btf_common.h"
 
@@ -191,11 +189,12 @@ void test(std::string_view input)
   test(*bpftrace, true, driver, input, 0, {}, true, false);
 }
 
-void test(std::string_view input, std::string_view expected_ast)
+void test(BPFtrace &bpftrace,
+          std::string_view input,
+          std::string_view expected_ast)
 {
-  auto bpftrace = get_mock_bpftrace();
-  Driver driver(*bpftrace);
-  test(*bpftrace, true, driver, input, 0, {}, true, false);
+  Driver driver(bpftrace);
+  test(bpftrace, true, driver, input, 0, {}, true, false);
 
   if (expected_ast[0] == '\n')
     expected_ast.remove_prefix(1); // Remove initial '\n'
@@ -213,6 +212,12 @@ void test(std::string_view input, std::string_view expected_ast)
   }
 
   EXPECT_EQ(expected_ast, out.str());
+}
+
+void test(std::string_view input, std::string_view expected_ast)
+{
+  auto bpftrace = get_mock_bpftrace();
+  test(*bpftrace, input, expected_ast);
 }
 
 void test_error(BPFtrace &bpftrace,
@@ -302,11 +307,11 @@ uprobe:/bin/sh:f { args }
 
 TEST(semantic_analyser, builtin_cpid)
 {
-  test("i:ms:100 { printf(\"%d\\n\", cpid); }", 1, false, false);
+  test(R"(i:ms:100 { printf("%d\n", cpid); })", 1, false, false);
   test("i:ms:100 { @=cpid }", 1, false, false);
   test("i:ms:100 { $a=cpid }", 1, false, false);
 
-  test("i:ms:100 { printf(\"%d\\n\", cpid); }", 0, false, true);
+  test(R"(i:ms:100 { printf("%d\n", cpid); })", 0, false, true);
   test("i:ms:100 { @=cpid }", 0, false, true);
   test("i:ms:100 { $a=cpid }", 0, false, true);
 }
@@ -332,8 +337,8 @@ TEST(semantic_analyser, builtin_functions)
   test("kprobe:f { exit() }");
   test("kprobe:f { str(0xffff) }");
   test("kprobe:f { buf(0xffff, 1) }");
-  test("kprobe:f { printf(\"hello\\n\") }");
-  test("kprobe:f { system(\"ls\\n\") }", 0, false /* safe_node */);
+  test(R"(kprobe:f { printf("hello\n") })");
+  test(R"(kprobe:f { system("ls\n") })", 0, false /* safe_node */);
   test("kprobe:f { join(0) }");
   test("kprobe:f { ksym(0xffff) }");
   test("kprobe:f { usym(0xffff) }");
@@ -385,6 +390,8 @@ kprobe:f / @mymap1 == 1234 / { 1234; @mymap1 = @mymap2; }
 TEST(semantic_analyser, consistent_map_values)
 {
   test("kprobe:f { @x = 0; @x = 1; }");
+  test(
+      R"(BEGIN { $a = (3, "hello"); @m[1] = $a; $a = (1,"aaaaaaaaaa"); @m[2] = $a; })");
   test_error("kprobe:f { @x = 0; @x = \"a\"; }", R"(
 stdin:1:20-22: ERROR: Type mismatch for @x: trying to assign value of type 'string[2]' when map already contains a value of type 'int64'
 kprobe:f { @x = 0; @x = "a"; }
@@ -403,12 +410,12 @@ TEST(semantic_analyser, consistent_map_keys)
   test("BEGIN { @x[1] = 0; @x[2]; }");
 
   test_error("BEGIN { @x = 0; @x[1]; }", R"(
-stdin:1:17-22: ERROR: Argument mismatch for @x: trying to access with arguments: [unsigned int64] when map expects arguments: []
+stdin:1:17-22: ERROR: Argument mismatch for @x: trying to access with arguments: [uint64] when map expects arguments: []
 BEGIN { @x = 0; @x[1]; }
                 ~~~~~
 )");
   test_error("BEGIN { @x[1] = 0; @x; }", R"(
-stdin:1:20-22: ERROR: Argument mismatch for @x: trying to access with arguments: [] when map expects arguments: [unsigned int64]
+stdin:1:20-22: ERROR: Argument mismatch for @x: trying to access with arguments: [] when map expects arguments: [uint64]
 BEGIN { @x[1] = 0; @x; }
                    ~~
 )");
@@ -416,17 +423,17 @@ BEGIN { @x[1] = 0; @x; }
   test("BEGIN { @x[1,2] = 0; @x[3,4]; }");
 
   test_error("BEGIN { @x[1,2] = 0; @x[3]; }", R"(
-stdin:1:22-27: ERROR: Argument mismatch for @x: trying to access with arguments: [unsigned int64] when map expects arguments: [unsigned int64, unsigned int64]
+stdin:1:22-27: ERROR: Argument mismatch for @x: trying to access with arguments: [uint64] when map expects arguments: [uint64, uint64]
 BEGIN { @x[1,2] = 0; @x[3]; }
                      ~~~~~
 )");
   test_error("BEGIN { @x[1] = 0; @x[2,3]; }", R"(
-stdin:1:20-27: ERROR: Argument mismatch for @x: trying to access with arguments: [unsigned int64, unsigned int64] when map expects arguments: [unsigned int64]
+stdin:1:20-27: ERROR: Argument mismatch for @x: trying to access with arguments: [uint64, uint64] when map expects arguments: [uint64]
 BEGIN { @x[1] = 0; @x[2,3]; }
                    ~~~~~~~
 )");
 
-  test("BEGIN { @x[1,\"a\",kstack] = 0; @x[2,\"b\", kstack]; }");
+  test(R"(BEGIN { @x[1,"a",kstack] = 0; @x[2,"b", kstack]; })");
 
   test_error(R"(
     BEGIN {
@@ -434,7 +441,7 @@ BEGIN { @x[1] = 0; @x[2,3]; }
       @x["b", 2, kstack];
     })",
              R"(
-stdin:3:7-25: ERROR: Argument mismatch for @x: trying to access with arguments: [string[2], unsigned int64, kstack] when map expects arguments: [unsigned int64, string[2], kstack]
+stdin:3:7-25: ERROR: Argument mismatch for @x: trying to access with arguments: [string[2], uint64, kstack] when map expects arguments: [uint64, string[2], kstack]
       @x["b", 2, kstack];
       ~~~~~~~~~~~~~~~~~~
 )");
@@ -471,9 +478,9 @@ kprobe:f / @mymap / { @mymap = "str" }
 TEST(semantic_analyser, ternary_expressions)
 {
   test("kprobe:f { @x = pid < 10000 ? 1 : 2 }");
-  test("kprobe:f { @x = pid < 10000 ? \"lo\" : \"high\" }");
+  test(R"(kprobe:f { @x = pid < 10000 ? "lo" : "high" })");
   test("kprobe:f { pid < 10000 ? printf(\"lo\") : exit() }");
-  test("kprobe:f { @x = pid < 10000 ? printf(\"lo\") : cat(\"/proc/uptime\") }",
+  test(R"(kprobe:f { @x = pid < 10000 ? printf("lo") : cat("/proc/uptime") })",
        10);
   // Error location is incorrect: #3063
   test_error("kprobe:f { pid < 10000 ? 3 : cat(\"/proc/uptime\") }", R"(
@@ -841,7 +848,7 @@ TEST(semantic_analyser, call_delete)
   test("kprobe:f { @x = 1; delete(@x) ? 0 : 1; }", 10);
 
   test_error("kprobe:f { @x = 1; @y[5] = 5; delete(@x, @y); }", R"(
-stdin:1:42-44: ERROR: Argument mismatch for @y: trying to access with arguments: [] when map expects arguments: [unsigned int64]
+stdin:1:42-44: ERROR: Argument mismatch for @y: trying to access with arguments: [] when map expects arguments: [uint64]
 kprobe:f { @x = 1; @y[5] = 5; delete(@x, @y); }
                                          ~~
 )");
@@ -899,7 +906,7 @@ TEST(semantic_analyser, call_print_map_item)
   test(R"_(BEGIN { @x[1,2] = "asdf"; print((1, 2, @x[1,2])); })_");
 
   test_error("BEGIN { @x[1] = 1; print(@x[\"asdf\"]); }", R"(
-stdin:1:20-36: ERROR: Argument mismatch for @x: trying to access with arguments: [string[5]] when map expects arguments: [unsigned int64]
+stdin:1:20-36: ERROR: Argument mismatch for @x: trying to access with arguments: [string[5]] when map expects arguments: [uint64]
 BEGIN { @x[1] = 1; print(@x["asdf"]); }
                    ~~~~~~~~~~~~~~~~
 )");
@@ -995,19 +1002,19 @@ TEST(semantic_analyser, call_strftime)
 {
   test("kprobe:f { strftime(\"%M:%S\", 1); }");
   test("kprobe:f { strftime(\"%M:%S\", nsecs); }");
-  test("kprobe:f { strftime(\"%M:%S\", \"\"); }", 10);
+  test(R"(kprobe:f { strftime("%M:%S", ""); })", 10);
   test("kprobe:f { strftime(1, nsecs); }", 10);
   test("kprobe:f { $var = \"str\"; strftime($var, nsecs); }", 10);
   test("kprobe:f { strftime(); }", 1);
   test("kprobe:f { strftime(\"%M:%S\"); }", 1);
   test("kprobe:f { strftime(\"%M:%S\", 1, 1); }", 1);
   test("kprobe:f { strftime(1, 1, 1); }", 1);
-  test("kprobe:f { strftime(\"%M:%S\", \"\", 1); }", 1);
+  test(R"(kprobe:f { strftime("%M:%S", "", 1); })", 1);
   test("kprobe:f { $ts = strftime(\"%M:%S\", 1); }");
   test("kprobe:f { @ts = strftime(\"%M:%S\", nsecs); }");
   test("kprobe:f { @[strftime(\"%M:%S\", nsecs)] = 1; }");
-  test("kprobe:f { printf(\"%s\", strftime(\"%M:%S\", nsecs)); }");
-  test("kprobe:f { strncmp(\"str\", strftime(\"%M:%S\", nsecs), 10); }", 10);
+  test(R"(kprobe:f { printf("%s", strftime("%M:%S", nsecs)); })");
+  test(R"(kprobe:f { strncmp("str", strftime("%M:%S", nsecs), 10); })", 10);
 
   test("kprobe:f { strftime(\"%M:%S\", nsecs(monotonic)); }", 10);
   test("kprobe:f { strftime(\"%M:%S\", nsecs(boot)); }");
@@ -1028,6 +1035,15 @@ TEST(semantic_analyser, call_str_2_lit)
   test("kprobe:f { str(arg0, -3); }", 10);
   test("kprobe:f { @x = str(arg0, 3); }");
   test("kprobe:f { str(arg0, \"hello\"); }", 10);
+
+  // Check the string size
+  BPFtrace bpftrace;
+  Driver driver(bpftrace);
+  test(driver, "kprobe:f { $x = str(arg0, 3); }");
+
+  auto x = static_cast<ast::AssignVarStatement *>(
+      driver.ctx.root->probes.at(0)->stmts.at(0));
+  EXPECT_EQ(CreateString(3), x->var->type);
 }
 
 TEST(semantic_analyser, call_str_2_expr)
@@ -1042,7 +1058,7 @@ TEST(semantic_analyser, call_str_state_leak_regression_test)
   // call. This would make the semantic analyser think it's still processing
   // a positional parameter in the second str() call causing confusing error
   // messages.
-  test(R"PROG(kprobe:f { $x = str($1) == "asdf"; $y = str(arg0) })PROG");
+  test(R"PROG(kprobe:f { $x = str($1) == "asdf"; $y = str(arg0, 1) })PROG");
 }
 
 TEST(semantic_analyser, call_buf)
@@ -1614,10 +1630,10 @@ TEST(semantic_analyser, unroll)
   bpftrace.add_param("10");
   bpftrace.add_param("hello");
   bpftrace.add_param("101");
-  test(bpftrace, "kprobe:f { unroll($#) { printf(\"hi\\n\"); } }");
-  test(bpftrace, "kprobe:f { unroll($1) { printf(\"hi\\n\"); } }");
-  test(bpftrace, "kprobe:f { unroll($2) { printf(\"hi\\n\"); } }", 1);
-  test(bpftrace, "kprobe:f { unroll($3) { printf(\"hi\\n\"); } }", 1);
+  test(bpftrace, R"(kprobe:f { unroll($#) { printf("hi\n"); } })");
+  test(bpftrace, R"(kprobe:f { unroll($1) { printf("hi\n"); } })");
+  test(bpftrace, R"(kprobe:f { unroll($2) { printf("hi\n"); } })", 1);
+  test(bpftrace, R"(kprobe:f { unroll($3) { printf("hi\n"); } })", 1);
 }
 
 TEST(semantic_analyser, map_integer_sizes)
@@ -1677,6 +1693,28 @@ TEST(semantic_analyser, unop_increment_decrement)
   test("kprobe:f { $x = \"a\"; $x++; }", 10);
 }
 
+#ifdef HAVE_LIBLLDB
+#include "dwarf_common.h"
+
+class semantic_analyser_dwarf : public test_dwarf {};
+
+TEST_F(semantic_analyser_dwarf, reference_into_deref)
+{
+  auto uprobe = "uprobe:" + std::string(cxx_bin_) + ":cpp:func_1";
+
+  BPFtrace bpftrace;
+  test(bpftrace, uprobe + " { args.c }", R"(
+Program
+ )" + uprobe + R"(
+  dereference :: [Child, AS(user)]
+   . :: [Child *, AS(user)]
+    builtin: args :: [struct )" + uprobe + R"(_args, ctx: 1, AS(user)]
+    c
+)");
+}
+
+#endif // HAVE_LIBLLDB
+
 TEST(semantic_analyser, printf)
 {
   test("kprobe:f { printf(\"hi\") }");
@@ -1728,7 +1766,7 @@ TEST(semantic_analyser, debugf)
     // Long format string should be ok
     std::stringstream prog;
     prog << "i:ms:100 { debugf(\"" << std::string(59, 'a')
-         << "%s\\n\", \"a\"); }";
+         << R"(%s\n", "a"); })";
     test(prog.str());
   }
 }
@@ -1817,16 +1855,16 @@ TEST(semantic_analyser, printf_format_int_with_length)
 
 TEST(semantic_analyser, printf_format_string)
 {
-  test("kprobe:f { printf(\"str: %s\", \"mystr\") }");
+  test(R"(kprobe:f { printf("str: %s", "mystr") })");
   test("kprobe:f { printf(\"str: %s\", comm) }");
   test("kprobe:f { printf(\"str: %s\", str(arg0)) }");
-  test("kprobe:f { @x = \"hi\"; printf(\"str: %s\", @x) }");
-  test("kprobe:f { $x = \"hi\"; printf(\"str: %s\", $x) }");
+  test(R"(kprobe:f { @x = "hi"; printf("str: %s", @x) })");
+  test(R"(kprobe:f { $x = "hi"; printf("str: %s", $x) })");
 }
 
 TEST(semantic_analyser, printf_bad_format_string)
 {
-  test("kprobe:f { printf(\"%d\", \"mystr\") }", 10);
+  test(R"(kprobe:f { printf("%d", "mystr") })", 10);
   test("kprobe:f { printf(\"%d\", str(arg0)) }", 10);
 
   test("kprobe:f { printf(\"%s\", 1234) }", 10);
@@ -1835,41 +1873,41 @@ TEST(semantic_analyser, printf_bad_format_string)
 
 TEST(semantic_analyser, printf_format_buf)
 {
-  test("kprobe:f { printf(\"%r\", buf(\"mystr\", 5)) }");
+  test(R"(kprobe:f { printf("%r", buf("mystr", 5)) })");
 }
 
 TEST(semantic_analyser, printf_bad_format_buf)
 {
-  test("kprobe:f { printf(\"%r\", \"mystr\") }", 10);
+  test(R"(kprobe:f { printf("%r", "mystr") })", 10);
   test("kprobe:f { printf(\"%r\", arg0) }", 10);
 }
 
 TEST(semantic_analyser, printf_format_buf_no_ascii)
 {
-  test("kprobe:f { printf(\"%rx\", buf(\"mystr\", 5)) }");
+  test(R"(kprobe:f { printf("%rx", buf("mystr", 5)) })");
 }
 
 TEST(semantic_analyser, printf_bad_format_buf_no_ascii)
 {
-  test("kprobe:f { printf(\"%rx\", \"mystr\") }", 10);
+  test(R"(kprobe:f { printf("%rx", "mystr") })", 10);
   test("kprobe:f { printf(\"%rx\", arg0) }", 10);
 }
 
 TEST(semantic_analyser, printf_format_buf_nonescaped_hex)
 {
-  test("kprobe:f { printf(\"%rh\", buf(\"mystr\", 5)) }");
+  test(R"(kprobe:f { printf("%rh", buf("mystr", 5)) })");
 }
 
 TEST(semantic_analyser, printf_bad_format_buf_nonescaped_hex)
 {
-  test("kprobe:f { printf(\"%rh\", \"mystr\") }", 10);
+  test(R"(kprobe:f { printf("%rh", "mystr") })", 10);
   test("kprobe:f { printf(\"%rh\", arg0) }", 10);
 }
 
 TEST(semantic_analyser, printf_format_multi)
 {
-  test("kprobe:f { printf(\"%d %d %s\", 1, 2, \"mystr\") }");
-  test("kprobe:f { printf(\"%d %s %d\", 1, 2, \"mystr\") }", 10);
+  test(R"(kprobe:f { printf("%d %d %s", 1, 2, "mystr") })");
+  test(R"(kprobe:f { printf("%d %s %d", 1, 2, "mystr") })", 10);
 }
 
 TEST(semantic_analyser, join)
@@ -1885,8 +1923,8 @@ TEST(semantic_analyser, join)
 TEST(semantic_analyser, join_delimiter)
 {
   test("kprobe:f { join(arg0, \",\") }");
-  test("kprobe:f { printf(\"%s\", join(arg0, \",\")) }", 10);
-  test("kprobe:f { $fmt = \"mystring\"; join($fmt, \",\") }", 10);
+  test(R"(kprobe:f { printf("%s", join(arg0, ",")) })", 10);
+  test(R"(kprobe:f { $fmt = "mystring"; join($fmt, ",") })", 10);
   test("kprobe:f { @x = join(arg0, \",\") }", 1);
   test("kprobe:f { $x = join(arg0, \",\") }", 1);
   test("kprobe:f { join(arg0, 3) }", 10);
@@ -2098,7 +2136,7 @@ TEST(semantic_analyser, map_aggregations_explicit_cast)
   test("kprobe:f { @ = avg(5); print((1, (uint16)@)); }");
 
   test_error("kprobe:f { @ = hist(5); print((1, (uint16)@)); }", R"(
-stdin:1:35-43: ERROR: Cannot cast from "hist" to "unsigned int16"
+stdin:1:35-43: ERROR: Cannot cast from "hist" to "uint16"
 kprobe:f { @ = hist(5); print((1, (uint16)@)); }
                                   ~~~~~~~~
 )");
@@ -2574,6 +2612,70 @@ TEST(semantic_analyser, intarray_to_int_cast)
        1);
 }
 
+TEST(semantic_analyser, mixed_int_var_assignments)
+{
+  test("kprobe:f { $x = (uint64)0; $x = (uint16)1; }");
+  test("kprobe:f { $x = (int8)1; $x = 5; }");
+  test("kprobe:f { $x = 1; $x = -1; }");
+  test("kprobe:f { $x = (uint8)1; $x = 200; }");
+  test("kprobe:f { $x = (int8)1; $x = -2; }");
+  test("kprobe:f { $x = (int16)1; $x = 20000; }");
+  test_error("kprobe:f { $x = (uint8)1; $x = -1; }", R"(
+stdin:1:27-34: ERROR: Type mismatch for $x: trying to assign value of type 'int64' when variable already contains a value of type 'uint8'
+kprobe:f { $x = (uint8)1; $x = -1; }
+                          ~~~~~~~
+)");
+  test_error("kprobe:f { $x = (int16)1; $x = 100000; }", R"(
+stdin:1:27-38: ERROR: Type mismatch for $x: trying to assign value '100000' which does not fit into the variable of type 'int16'
+kprobe:f { $x = (int16)1; $x = 100000; }
+                          ~~~~~~~~~~~
+)");
+  test_error("kprobe:f { $a = (uint16)5; $x = (uint8)0; $x = $a; }", R"(
+stdin:1:43-50: ERROR: Integer size mismatch. Assignment type 'uint16' is larger than the variable type 'uint8'.
+kprobe:f { $a = (uint16)5; $x = (uint8)0; $x = $a; }
+                                          ~~~~~~~
+)");
+  test_error("kprobe:f { $a = (int8)-1; $x = (uint8)0; $x = $a; }", R"(
+stdin:1:42-49: ERROR: Type mismatch for $x: trying to assign value of type 'int8' when variable already contains a value of type 'uint8'
+kprobe:f { $a = (int8)-1; $x = (uint8)0; $x = $a; }
+                                         ~~~~~~~
+)");
+  test_error("kprobe:f { $x = -1; $x = 10223372036854775807; }", R"(
+stdin:1:21-46: ERROR: Type mismatch for $x: trying to assign value '10223372036854775807' which does not fit into the variable of type 'int64'
+kprobe:f { $x = -1; $x = 10223372036854775807; }
+                    ~~~~~~~~~~~~~~~~~~~~~~~~~
+)");
+  test_error("kprobe:f { $x = (0, (uint32)123); $x = (0, (int32)-123); }", R"(
+stdin:1:35-56: ERROR: Tuple type mismatch: (int64,uint32) != (int64,int32).
+kprobe:f { $x = (0, (uint32)123); $x = (0, (int32)-123); }
+                                  ~~~~~~~~~~~~~~~~~~~~~
+)");
+  test("BEGIN { $x = (uint8)1; $x = 5; }", R"(
+Program
+ BEGIN
+  =
+   variable: $x :: [uint8]
+   (uint8)
+    int: 1 :: [int64]
+  =
+   variable: $x :: [uint8]
+   (uint8)
+    int: 5 :: [int64]
+)");
+  test("BEGIN { $x = (int8)1; $x = 5; }", R"(
+Program
+ BEGIN
+  =
+   variable: $x :: [int8]
+   (int8)
+    int: 1 :: [int64]
+  =
+   variable: $x :: [int8]
+   (int8)
+    int: 5 :: [int64]
+)");
+}
+
 TEST(semantic_analyser, signal)
 {
   // int literals
@@ -2621,13 +2723,13 @@ TEST(semantic_analyser, signal)
 TEST(semantic_analyser, strncmp)
 {
   // Test strncmp builtin
-  test("i:s:1 { $a = \"bar\"; strncmp(\"foo\", $a, 1) }");
-  test("i:s:1 { strncmp(\"foo\", \"bar\", 1) }");
+  test(R"(i:s:1 { $a = "bar"; strncmp("foo", $a, 1) })");
+  test(R"(i:s:1 { strncmp("foo", "bar", 1) })");
   test("i:s:1 { strncmp(1) }", 1);
   test("i:s:1 { strncmp(1,1,1) }", 10);
   test("i:s:1 { strncmp(\"a\",1,1) }", 10);
-  test("i:s:1 { strncmp(\"a\",\"a\",-1) }", 1);
-  test("i:s:1 { strncmp(\"a\",\"a\",\"foo\") }", 1);
+  test(R"(i:s:1 { strncmp("a","a",-1) })", 1);
+  test(R"(i:s:1 { strncmp("a","a","foo") })", 1);
 }
 
 TEST(semantic_analyser, strncmp_posparam)
@@ -2635,15 +2737,15 @@ TEST(semantic_analyser, strncmp_posparam)
   BPFtrace bpftrace;
   bpftrace.add_param("1");
   bpftrace.add_param("hello");
-  test(bpftrace, "i:s:1 { strncmp(\"foo\", \"bar\", $1) }");
-  test(bpftrace, "i:s:1 { strncmp(\"foo\", \"bar\", $2) }", 1);
+  test(bpftrace, R"(i:s:1 { strncmp("foo", "bar", $1) })");
+  test(bpftrace, R"(i:s:1 { strncmp("foo", "bar", $2) })", 1);
 }
 
 TEST(semantic_analyser, strconrtains)
 {
   // Test strcontains builtin
-  test("i:s:1 { $a = \"bar\"; strcontains(\"foo\", $a) }");
-  test("i:s:1 { strcontains(\"foo\", \"bar\") }");
+  test(R"(i:s:1 { $a = "bar"; strcontains("foo", $a) })");
+  test(R"(i:s:1 { strcontains("foo", "bar") })");
   test("i:s:1 { strcontains(1) }", 1);
   test("i:s:1 { strcontains(1,1) }", 10);
   test("i:s:1 { strcontains(\"a\",1) }", 10);
@@ -2683,7 +2785,7 @@ TEST(semantic_analyser, unwatch)
   test("k:f { unwatch(*(int64*)arg0); }");
 
   test("i:s:1 { unwatch(\"asdf\") }", 10);
-  test("i:s:1 { @x[\"hi\"] = \"world\"; unwatch(@x[\"hi\"]) }", 10);
+  test(R"(i:s:1 { @x["hi"] = "world"; unwatch(@x["hi"]) })", 10);
   test("i:s:1 { printf(\"%d\", unwatch(2)) }", 10);
 }
 
@@ -3003,6 +3105,13 @@ TEST(semantic_analyser, tuple)
   test(R"_(BEGIN { @t = (1, 2, "string"); @t = (3, 4, "other"); })_");
   test(R"_(BEGIN { @t = (1, kstack()) })_");
   test(R"_(BEGIN { @t = (1, (2,3)) })_");
+  test(R"_(BEGIN { $t = (1, (int64)2); $t = (2, (int32)3); })_");
+
+  test_error(R"_(BEGIN { $t = (1, (int32)2); $t = (2, (int64)3); })_", R"(
+stdin:1:29-47: ERROR: Tuple type mismatch: (int64,int32) != (int64,int64).
+BEGIN { $t = (1, (int32)2); $t = (2, (int64)3); }
+                            ~~~~~~~~~~~~~~~~~~
+)");
 
   test(R"_(struct task_struct { int x; } BEGIN { $t = (1, curtask); })_");
   test(R"_(struct task_struct { int x[4]; } BEGIN { $t = (1, curtask->x); })_");
@@ -3010,12 +3119,29 @@ TEST(semantic_analyser, tuple)
   test(R"_(BEGIN { $t = (1, 2); $t = (4, "other"); })_", 10);
   test(R"_(BEGIN { $t = (1, 2); $t = 5; })_", 1);
   test(R"_(BEGIN { $t = (1, count()) })_", 1);
-  test(R"_(BEGIN { $t = ((int32)1, (int64)2); $t = ((int64)1, (int32)2); })_",
-       10);
 
   test(R"_(BEGIN { @t = (1, 2); @t = (4, "other"); })_", 10);
   test(R"_(BEGIN { @t = (1, 2); @t = 5; })_", 1);
   test(R"_(BEGIN { @t = (1, count()) })_", 1);
+
+  test(R"_(BEGIN { $t = (1, (2, 3)); $t = (4, ((int8)5, 6)); })_");
+
+  test_error(R"_(BEGIN { $t = (1, ((int8)2, 3)); $t = (4, (5, 6)); })_",
+             R"(
+stdin:1:33-49: ERROR: Tuple type mismatch: (int64,(int8,int64)) != (int64,(int64,int64)).
+BEGIN { $t = (1, ((int8)2, 3)); $t = (4, (5, 6)); }
+                                ~~~~~~~~~~~~~~~~
+)");
+
+  test_error(R"_(BEGIN { $t = ((uint8)1, (2, 3)); $t = (4, ((int8)5, 6)); })_",
+             R"(
+stdin:1:34-56: ERROR: Tuple type mismatch: (uint8,(int64,int64)) != (int64,(int8,int64)).
+BEGIN { $t = ((uint8)1, (2, 3)); $t = (4, ((int8)5, 6)); }
+                                 ~~~~~~~~~~~~~~~~~~~~~~
+)");
+
+  test(R"_(BEGIN { @t = (1, 2, "hi"); @t = (3, 4, "hellolongstr"); })_");
+  test(R"_(BEGIN { $t = (1, ("hi", 2)); $t = (3, ("hellolongstr", 4)); })_");
 }
 
 TEST(semantic_analyser, tuple_indexing)
@@ -3369,8 +3495,11 @@ TEST_F(semantic_analyser_btf, short_name)
 
 TEST_F(semantic_analyser_btf, call_path)
 {
-  test("kfunc:func_1 { $k = path( args.foo1 ) }");
-  test("kretfunc:func_1 { $k = path( retval->foo1 ) }");
+  test("kfunc:func_1 { @k = path( args.foo1 ) }");
+  test("kretfunc:func_1 { @k = path( retval->foo1 ) }");
+  test("kfunc:func_1 { path( args.foo1, 16);}");
+  test("kfunc:func_1 { path( args.foo1, \"Na\");}", 1);
+  test("kfunc:func_1 { path( args.foo1, -1);}", 1);
 }
 
 TEST_F(semantic_analyser_btf, call_skb_output)
@@ -3489,12 +3618,12 @@ Program
    int: 1 :: [int64]
   for
    decl
-    variable: $kv :: [(unsigned int64,int64)]
+    variable: $kv :: [(uint64,int64)]
    expr
     map: @map :: [int64]
    stmts
     call: print
-     variable: $kv :: [(unsigned int64,int64)]
+     variable: $kv :: [(uint64,int64)]
 )");
 }
 
@@ -3510,12 +3639,12 @@ Program
    int: 1 :: [int64]
   for
    decl
-    variable: $kv :: [((unsigned int64,unsigned int64),int64)]
+    variable: $kv :: [((uint64,uint64),int64)]
    expr
     map: @map :: [int64]
    stmts
     call: print
-     variable: $kv :: [((unsigned int64,unsigned int64),int64)]
+     variable: $kv :: [((uint64,uint64),int64)]
 )");
 }
 
@@ -3816,6 +3945,63 @@ uprobe:/bin/sh:f { buf(arg0) }
 )");
 }
 
-} // namespace semantic_analyser
-} // namespace test
-} // namespace bpftrace
+TEST(semantic_analyser, large_scratch_variables)
+{
+  auto bpftrace = get_mock_bpftrace();
+  ConfigSetter configs{ bpftrace->config_, ConfigSource::script };
+  configs.set(ConfigKeyInt::max_strlen, 1024);
+
+  test_error(*bpftrace, "BEGIN { $s = str(0, 999) }", R"(
+stdin:1:9-25: ERROR: Value is too big (999 bytes) for the stack. Try reducing its size, storing it in a map, or creating it in argument position to a helper call.
+
+Examples:
+    `$s = str(..);` => `$s = str(.., 32);`
+    `$s = str(..);` => `@s = str(..);`
+    `$s = str(..); print($s);` => `print(str(..));`
+
+BEGIN { $s = str(0, 999) }
+        ~~~~~~~~~~~~~~~~
+)");
+
+  test_error(*bpftrace, "BEGIN { $s = str(0) }", R"(
+stdin:1:9-20: ERROR: Value is too big (1024 bytes) for the stack. Try reducing its size, storing it in a map, or creating it in argument position to a helper call.
+
+Examples:
+    `$s = str(..);` => `$s = str(.., 32);`
+    `$s = str(..);` => `@s = str(..);`
+    `$s = str(..); print($s);` => `print(str(..));`
+
+BEGIN { $s = str(0) }
+        ~~~~~~~~~~~
+)");
+
+  test_error(*bpftrace, "BEGIN { $l = 1; $b = buf(0, $l) }", R"(
+stdin:1:17-32: ERROR: Value is too big (1024 bytes) for the stack. Try reducing its size, storing it in a map, or creating it in argument position to a helper call.
+
+Examples:
+    `$s = str(..);` => `$s = str(.., 32);`
+    `$s = str(..);` => `@s = str(..);`
+    `$s = str(..); print($s);` => `print(str(..));`
+
+BEGIN { $l = 1; $b = buf(0, $l) }
+                ~~~~~~~~~~~~~~~
+)");
+
+  test_error(*bpftrace, "kfunc:foo { $p = path((uint8 *)0) }", R"(
+stdin:1:13-34: ERROR: Value is too big (1024 bytes) for the stack. Try reducing its size, storing it in a map, or creating it in argument position to a helper call.
+
+Examples:
+    `$s = str(..);` => `$s = str(.., 32);`
+    `$s = str(..);` => `@s = str(..);`
+    `$s = str(..); print($s);` => `print(str(..));`
+
+kfunc:foo { $p = path((uint8 *)0) }
+            ~~~~~~~~~~~~~~~~~~~~~
+)");
+
+  // Values clamped small enough should fit
+  test("BEGIN { $s = str(0, 10) }");
+  test("BEGIN { $b = buf(0, 10) }");
+}
+
+} // namespace bpftrace::test::semantic_analyser

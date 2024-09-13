@@ -10,17 +10,22 @@ aot.builtin.cat limited output
 aot.builtin.comm
 aot.builtin.func_uprobe_elf_symtable
 aot.builtin.print args in kfunc
+# AOT shim needs to parse config and set up BPFTRACE_MAX_STRLEN
+aot.call.str_big_printf
 aot.call.cgroup_path
 aot.call.cgroup_path printf
 aot.call.hist_10g
 aot.call.iter:task
 aot.call.iter:task_file
 aot.call.iter:task_vma
+aot.call.iter printf multiple values
 aot.call.path_in_unsupported_kfunc
 aot.call.print_map_item_tuple
 aot.call.print_non_map_builtin
 aot.call.print_non_map_struct_kfunc
 aot.call.print_non_map_tuple
+# Same problem as #3392
+aot.call.str_big_tuple
 aot.call.str_truncated
 aot.call.str_truncated_custom
 aot.call.strftime
@@ -73,6 +78,10 @@ aot.tuples.basic tuple map
 aot.tuples.tuple print
 aot.tuples.tuple strftime type is packed
 aot.variable.tuple string resize
+aot.variable.map tuple string resize
+aot.variable.variable tuple string resize
+aot.variable.variable nested tuple string resize
+aot.variable.map nested tuple string resize
 aot.dwarf.uprobe inlined function - func
 aot.dwarf.uprobe inlined function - probe
 aot.dwarf.uprobe inlined function - ustack

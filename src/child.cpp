@@ -106,8 +106,11 @@ static void validate_cmd(std::vector<std::string>& cmd)
       // /usr/bin/ping
       // /usr/bin/ping
       std::unordered_set<std::string> uniq_abs_path;
-      for (unsigned int i = 0; i < paths.size(); i++) {
-        uniq_abs_path.insert(abs_path(paths[i]).value());
+      for (const auto& path : paths) {
+        auto absolute = abs_path(path);
+        if (!absolute.has_value())
+          continue;
+        uniq_abs_path.insert(*absolute);
       }
 
       if (uniq_abs_path.size() == 1) {
@@ -192,7 +195,7 @@ void ChildProc::terminate(bool force)
   check_child(force);
 }
 
-void ChildProc::resume(void)
+void ChildProc::resume()
 {
   assert(state_ == State::PTRACE_PAUSE);
   ptrace(PTRACE_DETACH, child_pid_, nullptr, 0);

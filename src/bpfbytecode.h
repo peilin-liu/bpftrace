@@ -10,6 +10,7 @@
 #include <bpf/libbpf.h>
 #include <cereal/access.hpp>
 #include <map>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -23,13 +24,16 @@ public:
   BpfBytecode()
   {
   }
-  BpfBytecode(const void *elf, size_t elf_size, BPFtrace &bpftrace);
+  BpfBytecode(std::span<const std::byte> elf);
+  BpfBytecode(std::span<uint8_t> elf);
+  BpfBytecode(std::span<char> elf);
 
   BpfBytecode(const BpfBytecode &) = delete;
   BpfBytecode &operator=(const BpfBytecode &) = delete;
   BpfBytecode(BpfBytecode &&) = default;
   BpfBytecode &operator=(BpfBytecode &&) = default;
 
+  void update_global_vars(BPFtrace &bpftrace);
   void load_progs(const RequiredResources &resources,
                   const BTF &btf,
                   BPFfeature &feature,
@@ -69,8 +73,7 @@ private:
   std::map<std::string, BpfMap> maps_;
   std::map<int, BpfMap *> maps_by_id_;
   std::map<std::string, BpfProgram> programs_;
-
-  size_t log_size_;
+  struct bpf_map *global_vars_map_ = nullptr;
 };
 
 } // namespace bpftrace

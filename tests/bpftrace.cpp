@@ -11,9 +11,7 @@
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
 
-namespace bpftrace {
-namespace test {
-namespace bpftrace {
+namespace bpftrace::test::bpftrace {
 
 #include "btf_common.h"
 
@@ -968,7 +966,9 @@ std::pair<std::vector<uint8_t>, std::vector<uint8_t>> key_value_pair_str(
   uint8_t *val_data = pair.second.data();
 
   for (size_t i = 0; i < key.size(); i++) {
-    strncpy((char *)key_data + STRING_SIZE * i, key.at(i).c_str(), STRING_SIZE);
+    strncpy(reinterpret_cast<char *>(key_data) + STRING_SIZE * i,
+            key.at(i).c_str(),
+            STRING_SIZE);
   }
   uint64_t v = val;
   std::memcpy(val_data, &v, sizeof(v));
@@ -990,7 +990,9 @@ std::pair<std::vector<uint8_t>, std::vector<uint8_t>> key_value_pair_int_str(
 
   uint64_t k = myint, v = val;
   std::memcpy(key_data, &k, sizeof(k));
-  strncpy((char *)key_data + sizeof(uint64_t), mystr.c_str(), STRING_SIZE);
+  strncpy(reinterpret_cast<char *>(key_data) + sizeof(uint64_t),
+          mystr.c_str(),
+          STRING_SIZE);
   std::memcpy(val_data, &v, sizeof(v));
 
   return pair;
@@ -1250,6 +1252,4 @@ TEST(bpftrace, add_probes_rawtracepoint_wildcard_no_matches)
   ASSERT_EQ(0U, bpftrace->get_special_probes().size());
 }
 
-} // namespace bpftrace
-} // namespace test
-} // namespace bpftrace
+} // namespace bpftrace::test::bpftrace

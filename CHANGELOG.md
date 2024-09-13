@@ -17,7 +17,13 @@ and this project adheres to
   - [#3285](https://github.com/bpftrace/bpftrace/pull/3285)
 - For-loops: Allow sharing variables between the main probe and the loop's body
   - [#3014](https://github.com/bpftrace/bpftrace/pull/3014)
+- Parse C++ Class and Inheritance from Debug Info
+  - [#3094](https://github.com/bpftrace/bpftrace/pull/3094)
+- Add an optional `size` parameter to `path`
+  - [#3401](https://github.com/bpftrace/bpftrace/pull/3401)
 #### Changed
+- Merge output into `stdout` when `-lv`
+  - [#3383](https://github.com/bpftrace/bpftrace/pull/3383)
 - Stream output when printing maps
   - [#3264](https://github.com/bpftrace/bpftrace/pull/3264)
 - Only print kernel headers not found message if parsing fails
@@ -49,6 +55,14 @@ and this project adheres to
   - #[3339](https://github.com/bpftrace/bpftrace/pull/3339)
 - Fix parsing large unsigned int strings as positional params
   - [#3336](https://github.com/bpftrace/bpftrace/pull/3336)
+- Fix json formatting for `strftime` function
+  - [#3381](https://github.com/bpftrace/bpftrace/pull/3381)
+- Fix BTF/DWARF parsing for structs contained in arrays
+  - [#3422](https://github.com/bpftrace/bpftrace/pull/3422)
+- Fix integer comparisons and auto casting for scratch variables
+  - [#3416](https://github.com/bpftrace/bpftrace/pull/3416)
+- Fix tuple resizing
+  - [#3443](https://github.com/bpftrace/bpftrace/pull/3443)
 #### Security
 #### Docs
 - Remove mention of unsupported character literals
@@ -79,6 +93,8 @@ and this project adheres to
   - [#3226](https://github.com/bpftrace/bpftrace/pull/3226)
 - Add config option for handling missing probes
   - [#3246](https://github.com/bpftrace/bpftrace/pull/3246)
+- Support large arguments for printf() and print()
+  - [#3368](https://github.com/bpftrace/bpftrace/pull/3368)
 #### Changed
 - Better error message for args in mixed probes
   - [#3047](https://github.com/bpftrace/bpftrace/pull/3047)
